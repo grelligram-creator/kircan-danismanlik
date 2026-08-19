@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 2 focused on v2 features: wallet/Stripe endpoints, credits->wallet_balance migration, and SSE streaming. Created pytest suite /app/backend/tests/backend_test.py (11 tests, all passing) covering wallet packages/costs, auth/me migration, removal of old credits endpoints, Stripe checkout + status + webhook signature enforcement, SSE stream event sequence with exact 2.0 TL FAQ charge, 402 insufficient balance, 404 unknown chat. Frontend verified end-to-end via Playwright: sidebar wallet (CÜZDAN + ₺98), wallet modal with 5 packages + per-message cost row, incremental (streaming) assistant reply with balance 98->96, Stripe redirect to real checkout.stripe.com session showing TRY 100.00, and /payment/success panel rendering.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/wallet/status/{session_id}", "issue": "Unknown/fake session_id returns 404 {'detail':'Transaction not found'} instead of a structured status payload; frontend swallows the error and keeps polling for the full 60s before timing out. Consider returning 404 with an explicit error code the UI can fail fast on (or have the UI stop polling on 404)."},
+      {"endpoint": "POST /api/webhook/stripe", "issue": "Correctly returns 400 for invalid body, but the CheckoutError stack trace is logged at exception level for every malformed request (log noise / potential DoS-log spam). Log as warning instead."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "/payment/success?session_id=<unknown>", "issue": "Panel stays in 'Doğrulanıyor' loader for ~60s (30 polls x 2s) because the 404 from /wallet/status is silently caught; only then does the timeout state render. Should abort polling on 404 and show 'Sorun Oluştu' immediately.", "affected_selectors": ["[data-testid=\"payment-success-panel\"]"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Stop polling on HTTP 404 in Payment.jsx (fail fast instead of 60s loader)",
+    "Downgrade stripe webhook invalid-payload logging from exception to warning",
+    "Update /app/memory/test_credentials.md: seed user now has wallet_balance (currently 150.0 TL), 'credits: 500' line is stale"
+  ],
+  "critical_code_review_comments": [
+    "send_message deducts cost only inside the SSE generator after the LLM completes; if the client disconnects mid-stream the assistant message is persisted but no charge occurs (revenue leak) — consider charging before streaming or in a finally block.",
+    "new_balance is computed from the User object read at request start (user.wallet_balance - cost) and written with $set; two concurrent messages will overwrite each other's deduction. Use an atomic $inc with a balance guard.",
+    "server.py is 767 lines — wallet/stripe and chat/streaming routes should be split into routers."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100% (11/11)", "frontend": "95% (all flows pass; payment page timeout UX slow)"},
+  "seed_data_creation": "Used existing seed user test-user-seed-001; temporarily set wallet_balance to 100/0.5 during tests, reset to 150.0. Test chats created were deleted.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "session_token test_session_seed_001 (Bearer or cookie) — works",
+  "context_for_next_testing_agent": "Backend regression suite at /app/backend/tests/backend_test.py (run: cd /app/backend && python -m pytest tests/backend_test.py -v). Only 1 short LLM stream call is made per full run (TestStreaming::test_faq_stream_and_charge). Stripe checkout creates real test-mode sessions (sk_test_emergent) — verified redirect and TRY amount, payment never completed so wallet crediting on 'paid' + webhook credit path remains untested. Iteration 1 covered uploads/PDF/DOCX/email mock.",
+  "rca_of_the_issue": "Payment success delay: /api/wallet/status returns 404 for unknown transactions; Payment.jsx wraps the call in try/catch {} with no status handling, so it retries the max 30 times before setting 'timeout'."
+}

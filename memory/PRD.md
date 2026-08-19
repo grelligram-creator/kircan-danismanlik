@@ -29,8 +29,14 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - Live report preview panel with A4-styled paper, sections + field table (2026-02-19)
 - PDF + DOCX report generators with brand styling (2026-02-19)
 - Mock email dispatch + email log (2026-02-19)
-- Mock credit purchase (starter/pro/enterprise) with upsell dialog + low-credit warning (2026-02-19)
-- Data-testids on all interactive elements; 100% test pass on iteration_1
+
+## Implemented (v2 — Feb 2026)
+- **SSE Streaming** for chat: `stream_message` API + fetch reader in ChatPanel; typewriter effect + live preview updates (2026-02-19)
+- **Wallet in TRY**: migrated `credits` (int) → `wallet_balance` (float TL); per-template cost model (konut 4 / ticari 6 / arsa 3 / endüstriyel 8 / FAQ 2 TL per message)
+- **Stripe Checkout wallet top-up** via emergentintegrations Flow B (`sk_test_emergent`, TRY currency): 5 packages (100/250/500/1000/2500 TL) with bonus tiers, redirect to Stripe, webhook + polling status verification, atomic `$inc` credit
+- **Payment success/cancel pages** with 404 fast-fail
+- **Atomic wallet deduction** with `find_one_and_update` prevents concurrency races & revenue leak on client disconnect
+- Testing agent iteration_2: 11/11 backend pytest + full UI verified
 
 ## Prioritized Backlog
 ### P0 (blocking full production)

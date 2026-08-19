@@ -11,7 +11,8 @@ REPORT_TEMPLATES = [
         "name": "Konut Değerleme Raporu",
         "description": "Daire, müstakil ev veya villa için standart konut değerleme raporu.",
         "icon": "Home",
-        "credit_cost": 25,
+        "cost_per_message": 4.0,
+        "avg_report_cost": 25.0,
         "sections": [
             "Rapor Özeti",
             "Gayrimenkulün Yeri ve Ulaşım",
@@ -38,7 +39,8 @@ REPORT_TEMPLATES = [
         "name": "Ticari Gayrimenkul Değerleme",
         "description": "Ofis, dükkan, plaza veya AVM ünitesi için ticari değerleme.",
         "icon": "Building2",
-        "credit_cost": 35,
+        "cost_per_message": 6.0,
+        "avg_report_cost": 40.0,
         "sections": [
             "Rapor Özeti",
             "Lokasyon Analizi",
@@ -65,7 +67,8 @@ REPORT_TEMPLATES = [
         "name": "Arsa Değerleme Raporu",
         "description": "İmarlı veya imarsız arsa/arazi için değerleme raporu.",
         "icon": "Map",
-        "credit_cost": 20,
+        "cost_per_message": 3.0,
+        "avg_report_cost": 20.0,
         "sections": [
             "Rapor Özeti",
             "Konum ve Ulaşım",
@@ -90,7 +93,8 @@ REPORT_TEMPLATES = [
         "name": "Endüstriyel Tesis Değerleme",
         "description": "Fabrika, depo veya lojistik tesis değerleme raporu.",
         "icon": "Factory",
-        "credit_cost": 45,
+        "cost_per_message": 8.0,
+        "avg_report_cost": 55.0,
         "sections": [
             "Rapor Özeti",
             "Tesis Bilgileri",

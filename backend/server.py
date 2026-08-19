@@ -1,6 +1,6 @@
 """Main FastAPI backend for Real Estate Valuation AI Chat."""
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, UploadFile, File, Form, Cookie, Header, Depends
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -12,12 +12,17 @@ import os
 import uuid
 import json
 import logging
+import asyncio
 import httpx
 
-from emergentintegrations.llm.chat import LlmChat, UserMessage, FileContentWithMimeType
+from emergentintegrations.llm.chat import LlmChat, UserMessage, FileContentWithMimeType, TextDelta, StreamDone
+from emergentintegrations.payments.stripe.checkout import (
+    StripeCheckout, CheckoutSessionRequest, CheckoutStatusResponse,
+)
 
 from templates_data import REPORT_TEMPLATES, FAQ_ITEMS
 from document_utils import parse_uploaded_file, generate_pdf, generate_docx
+from wallet_packages import WALLET_PACKAGES, get_package
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -30,6 +35,7 @@ REPORTS_DIR.mkdir(exist_ok=True)
 MONGO_URL = os.environ['MONGO_URL']
 DB_NAME = os.environ['DB_NAME']
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
+STRIPE_API_KEY = os.environ.get('STRIPE_API_KEY', 'sk_test_emergent')
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -49,7 +55,7 @@ class User(BaseModel):
     email: str
     name: str
     picture: str = ""
-    credits: int = 100
+    wallet_balance: float = 50.0
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -106,9 +112,17 @@ async def get_current_user(
     if not user_doc:
         raise HTTPException(status_code=401, detail="User not found")
 
-    # normalize created_at
+    # normalize created_at & backfill legacy credits->wallet_balance
     if isinstance(user_doc.get("created_at"), str):
         user_doc["created_at"] = datetime.fromisoformat(user_doc["created_at"])
+    if "wallet_balance" not in user_doc:
+        legacy_credits = user_doc.get("credits", 0)
+        user_doc["wallet_balance"] = float(legacy_credits) if legacy_credits else 50.0
+        await db.users.update_one(
+            {"user_id": user_doc["user_id"]},
+            {"$set": {"wallet_balance": user_doc["wallet_balance"]}, "$unset": {"credits": ""}},
+        )
+    user_doc.pop("credits", None)
     return User(**user_doc)
 
 
@@ -148,7 +162,7 @@ async def create_session(payload: Dict[str, str], response: Response):
             "email": email,
             "name": data.get("name", ""),
             "picture": data.get("picture", ""),
-            "credits": 100,
+            "wallet_balance": 50.0,
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
 
@@ -349,25 +363,42 @@ def _extract_update(text: str) -> tuple[str, Optional[Dict[str, Any]]]:
         return clean, None
 
 
+def _cost_for_chat(chat: Dict[str, Any]) -> float:
+    if chat["mode"] == "faq":
+        return 2.0
+    tpl = _template_by_id(chat.get("template_id", "")) if chat.get("template_id") else None
+    return float(tpl["cost_per_message"]) if tpl else 5.0
+
+
 @api.post("/chats/{chat_id}/message")
 async def send_message(
     chat_id: str,
     payload: Dict[str, Any],
     user: User = Depends(get_current_user),
 ):
+    """SSE streaming endpoint. Streams `delta` events, then a final `done` event."""
     chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    # Cost: FAQ=5, Report=10 credits per message
-    cost = 5 if chat["mode"] == "faq" else 10
-    if user.credits < cost:
-        raise HTTPException(status_code=402, detail={"error": "insufficient_credits", "required": cost, "balance": user.credits})
+    cost = _cost_for_chat(chat)
+    # Atomically reserve funds up-front (prevents race + revenue leak on client disconnect).
+    # We only charge if the current balance can cover the cost; otherwise return 402.
+    reserved = await db.users.find_one_and_update(
+        {"user_id": user.user_id, "wallet_balance": {"$gte": cost}},
+        {"$inc": {"wallet_balance": -cost}},
+        return_document=True,
+    )
+    if not reserved:
+        raise HTTPException(
+            status_code=402,
+            detail={"error": "insufficient_balance", "required": cost, "balance": user.wallet_balance},
+        )
+    new_balance = round(float(reserved.get("wallet_balance", 0.0)), 2)
 
-    user_text = payload.get("content", "").strip()
+    user_text = (payload.get("content") or "").strip()
     attachment_ids: List[str] = payload.get("attachment_ids", [])
 
-    # Save user message
     user_msg = {
         "message_id": f"msg_{uuid.uuid4().hex[:10]}",
         "chat_id": chat_id,
@@ -377,10 +408,8 @@ async def send_message(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    # Load prior history for context (last 20)
     history = await db.messages.find({"chat_id": chat_id}, {"_id": 0}).sort("created_at", 1).to_list(500)
 
-    # Gather attachment content
     attachment_texts = []
     for aid in attachment_ids:
         att = await db.uploads.find_one({"upload_id": aid, "user_id": user.user_id}, {"_id": 0})
@@ -392,7 +421,6 @@ async def send_message(
     await db.messages.insert_one(user_msg)
     user_msg.pop("_id", None)
 
-    # Build LLM chat
     system_prompt = _build_system_prompt(chat)
     llm = LlmChat(
         api_key=EMERGENT_LLM_KEY,
@@ -400,8 +428,6 @@ async def send_message(
         system_message=system_prompt,
     ).with_model("anthropic", "claude-sonnet-5")
 
-    # Inject history as context (except last user msg — we send fresh)
-    # emergentintegrations LlmChat auto-tracks per session_id; we build a single message with history embedded.
     context_lines: List[str] = []
     for m in history[-20:]:
         if m["role"] == "user":
@@ -411,75 +437,86 @@ async def send_message(
             context_lines.append(f"Asistan: {clean}")
     context_str = "\n\n".join(context_lines)
 
-    full_prompt = user_text
+    full_prompt = user_text or "(Ekli dosyaları analiz et)"
     if attachment_texts:
         full_prompt = full_prompt + "\n\n" + "\n\n".join(attachment_texts)
     if context_str:
         full_prompt = f"[Önceki konuşma]\n{context_str}\n\n[Yeni mesaj]\n{full_prompt}"
 
-    try:
-        assistant_raw = await llm.send_message(UserMessage(text=full_prompt))
-        if hasattr(assistant_raw, "content"):
-            assistant_text = assistant_raw.content
-        else:
-            assistant_text = str(assistant_raw)
-    except Exception as e:
-        logger.exception("LLM error")
-        raise HTTPException(status_code=500, detail=f"LLM hatası: {e}")
+    async def event_generator():
+        # first event: user message echo (so frontend can render it immediately)
+        yield f"data: {json.dumps({'type': 'user_message', 'message': user_msg}, default=str)}\n\n"
 
-    clean_text, update = _extract_update(assistant_text)
+        full_text_parts: List[str] = []
+        try:
+            async for event in llm.stream_message(UserMessage(text=full_prompt)):
+                if isinstance(event, TextDelta):
+                    full_text_parts.append(event.content)
+                    # stream raw text so UI can accumulate; UI strips <!--UPDATE ...--> markers.
+                    yield f"data: {json.dumps({'type': 'delta', 'content': event.content})}\n\n"
+                elif isinstance(event, StreamDone):
+                    break
+        except Exception as e:
+            logger.exception("LLM stream error")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            return
 
-    # Persist assistant message (clean text)
-    assistant_msg = {
-        "message_id": f"msg_{uuid.uuid4().hex[:10]}",
-        "chat_id": chat_id,
-        "role": "assistant",
-        "content": clean_text,
-        "attachments": [],
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    await db.messages.insert_one(assistant_msg)
-    assistant_msg.pop("_id", None)
+        assistant_text = "".join(full_text_parts)
+        clean_text, update = _extract_update(assistant_text)
 
-    # Apply updates to chat doc
-    new_fields = dict(chat.get("fields", {}))
-    new_sections = dict(chat.get("sections", {}))
-    new_status = chat.get("status", "in_progress")
-    if update:
-        if isinstance(update.get("fields"), dict):
-            new_fields.update({k: v for k, v in update["fields"].items() if v not in (None, "")})
-        if isinstance(update.get("sections"), dict):
-            new_sections.update({k: v for k, v in update["sections"].items() if v})
-        if update.get("status") == "completed":
-            new_status = "completed"
+        assistant_msg = {
+            "message_id": f"msg_{uuid.uuid4().hex[:10]}",
+            "chat_id": chat_id,
+            "role": "assistant",
+            "content": clean_text,
+            "attachments": [],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await db.messages.insert_one(assistant_msg)
+        assistant_msg.pop("_id", None)
 
-    # Auto-complete: if all fields collected and all sections generated
-    template = _template_by_id(chat.get("template_id", "")) if chat.get("template_id") else None
-    if template:
-        all_fields_done = all(k in new_fields and new_fields[k] not in (None, "") for k in [f["key"] for f in template["fields"]])
-        all_sections_done = all(s in new_sections and new_sections[s] for s in template["sections"])
-        if all_fields_done and all_sections_done:
-            new_status = "completed"
+        # Apply updates
+        new_fields = dict(chat.get("fields", {}))
+        new_sections = dict(chat.get("sections", {}))
+        new_status = chat.get("status", "in_progress")
+        if update:
+            if isinstance(update.get("fields"), dict):
+                new_fields.update({k: v for k, v in update["fields"].items() if v not in (None, "")})
+            if isinstance(update.get("sections"), dict):
+                new_sections.update({k: v for k, v in update["sections"].items() if v})
+            if update.get("status") == "completed":
+                new_status = "completed"
 
-    await db.chats.update_one(
-        {"chat_id": chat_id},
-        {"$set": {"fields": new_fields, "sections": new_sections, "status": new_status}},
+        tpl = _template_by_id(chat.get("template_id", "")) if chat.get("template_id") else None
+        if tpl:
+            all_fields_done = all(k in new_fields and new_fields[k] not in (None, "")
+                                   for k in [f["key"] for f in tpl["fields"]])
+            all_sections_done = all(s in new_sections and new_sections[s] for s in tpl["sections"])
+            if all_fields_done and all_sections_done:
+                new_status = "completed"
+
+        await db.chats.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"fields": new_fields, "sections": new_sections, "status": new_status}},
+        )
+
+        updated_chat = await db.chats.find_one({"chat_id": chat_id}, {"_id": 0})
+
+        done_payload = {
+            "type": "done",
+            "assistant_message": assistant_msg,
+            "chat": updated_chat,
+            "wallet_balance": new_balance,
+            "cost_charged": cost,
+            "low_balance_warning": new_balance < 10.0,
+        }
+        yield f"data: {json.dumps(done_payload, default=str)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-    # Deduct credits
-    new_credits = max(0, user.credits - cost)
-    await db.users.update_one({"user_id": user.user_id}, {"$set": {"credits": new_credits}})
-
-    updated_chat = await db.chats.find_one({"chat_id": chat_id}, {"_id": 0})
-
-    return {
-        "user_message": user_msg,
-        "assistant_message": assistant_msg,
-        "chat": updated_chat,
-        "credits": new_credits,
-        "credit_cost": cost,
-        "low_credit_warning": new_credits < 20,
-    }
 
 
 # ============================================================
@@ -566,29 +603,153 @@ async def email_report(chat_id: str, user: User = Depends(get_current_user)):
 
 
 # ============================================================
-# Credits
+# Wallet + Stripe (Flow B via emergentintegrations)
 # ============================================================
 
-@api.get("/credits/packages")
-async def credit_packages():
-    return {"packages": [
-        {"id": "starter", "name": "Başlangıç", "credits": 500, "price_try": 299, "popular": False},
-        {"id": "pro", "name": "Profesyonel", "credits": 1500, "price_try": 799, "popular": True},
-        {"id": "enterprise", "name": "Kurumsal", "credits": 5000, "price_try": 2499, "popular": False},
-    ]}
+def _stripe_checkout(host_url: str) -> StripeCheckout:
+    webhook_url = f"{host_url.rstrip('/')}/api/webhook/stripe"
+    return StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
 
 
-@api.post("/credits/purchase")
-async def purchase_credits(payload: Dict[str, str], user: User = Depends(get_current_user)):
-    """MOCK credit purchase — adds credits directly."""
-    pkg_id = payload.get("package_id")
-    packages = {"starter": 500, "pro": 1500, "enterprise": 5000}
-    if pkg_id not in packages:
+@api.get("/wallet/packages")
+async def wallet_packages():
+    return {"packages": WALLET_PACKAGES, "currency": "TRY"}
+
+
+@api.get("/wallet/costs")
+async def wallet_costs():
+    """Publish per-message costs so UI can show them transparently."""
+    return {
+        "faq": 2.0,
+        "templates": [
+            {"id": t["id"], "name": t["name"], "cost_per_message": t["cost_per_message"], "avg_report_cost": t["avg_report_cost"]}
+            for t in REPORT_TEMPLATES
+        ],
+    }
+
+
+@api.post("/wallet/checkout")
+async def wallet_checkout(payload: Dict[str, Any], request: Request, user: User = Depends(get_current_user)):
+    package_id = payload.get("package_id")
+    origin_url = payload.get("origin_url")
+    if not package_id or not origin_url:
+        raise HTTPException(status_code=400, detail="package_id and origin_url required")
+    pkg = get_package(package_id)
+    if not pkg:
         raise HTTPException(status_code=400, detail="Invalid package")
-    added = packages[pkg_id]
-    new_credits = user.credits + added
-    await db.users.update_one({"user_id": user.user_id}, {"$set": {"credits": new_credits}})
-    return {"success": True, "added": added, "credits": new_credits, "mock": True}
+
+    total_credit_try = pkg["amount_try"] + pkg["bonus_try"]
+
+    host_url = str(request.base_url)
+    checkout = _stripe_checkout(host_url)
+    req = CheckoutSessionRequest(
+        amount=float(pkg["amount_try"]),
+        currency="try",
+        success_url=f"{origin_url.rstrip('/')}/payment/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{origin_url.rstrip('/')}/payment/cancel",
+        metadata={
+            "user_id": user.user_id,
+            "package_id": package_id,
+            "credit_try": str(total_credit_try),
+            "amount_try": str(pkg["amount_try"]),
+            "bonus_try": str(pkg["bonus_try"]),
+        },
+    )
+    session = await checkout.create_checkout_session(req)
+
+    await db.payment_transactions.insert_one({
+        "session_id": session.session_id,
+        "user_id": user.user_id,
+        "package_id": package_id,
+        "amount_try": pkg["amount_try"],
+        "bonus_try": pkg["bonus_try"],
+        "credit_try": total_credit_try,
+        "currency": "try",
+        "status": "initiated",
+        "payment_status": "pending",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+    return {"checkout_url": session.url, "session_id": session.session_id}
+
+
+async def _credit_wallet_if_paid(session_id: str, request: Request) -> Dict[str, Any]:
+    """Idempotent: if paid and not yet credited, add credit_try to user's wallet."""
+    tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+    if not tx:
+        return {"found": False}
+    if tx.get("payment_status") == "paid" and tx.get("credited"):
+        return {"found": True, "already": True, "tx": tx}
+
+    # Ask Stripe directly (fallback for delayed webhooks)
+    host_url = str(request.base_url)
+    checkout = _stripe_checkout(host_url)
+    try:
+        status: CheckoutStatusResponse = await checkout.get_checkout_status(session_id)
+    except Exception as e:
+        logger.warning(f"Stripe status fetch failed: {e}")
+        return {"found": True, "tx": tx}
+
+    is_paid = str(status.payment_status).lower() == "paid" or str(status.status).lower() == "complete"
+
+    updates: Dict[str, Any] = {
+        "status": status.status,
+        "payment_status": status.payment_status,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if is_paid and not tx.get("credited"):
+        # atomic: only credit once
+        result = await db.payment_transactions.update_one(
+            {"session_id": session_id, "credited": {"$ne": True}},
+            {"$set": {**updates, "credited": True, "credited_at": datetime.now(timezone.utc).isoformat()}},
+        )
+        if result.modified_count == 1:
+            await db.users.update_one(
+                {"user_id": tx["user_id"]},
+                {"$inc": {"wallet_balance": float(tx["credit_try"])}},
+            )
+    else:
+        await db.payment_transactions.update_one({"session_id": session_id}, {"$set": updates})
+
+    tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+    return {"found": True, "tx": tx, "paid": is_paid}
+
+
+@api.get("/wallet/status/{session_id}")
+async def wallet_status(session_id: str, request: Request):
+    """Unauthenticated status endpoint (per playbook), returns limited fields."""
+    result = await _credit_wallet_if_paid(session_id, request)
+    if not result["found"]:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    tx = result["tx"]
+    return {
+        "session_id": tx["session_id"],
+        "status": tx.get("status"),
+        "payment_status": tx.get("payment_status"),
+        "amount_try": tx.get("amount_try"),
+        "credit_try": tx.get("credit_try"),
+        "credited": tx.get("credited", False),
+    }
+
+
+@api.post("/webhook/stripe")
+async def stripe_webhook(request: Request):
+    body = await request.body()
+    sig = request.headers.get("Stripe-Signature", "")
+    host_url = str(request.base_url)
+    checkout = _stripe_checkout(host_url)
+    try:
+        result = await checkout.handle_webhook(body, sig)
+    except Exception as e:
+        logger.warning(f"Stripe webhook signature verification failed: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+    session_id = getattr(result, "session_id", None)
+    if session_id:
+        # Reuse the paid+credit logic
+        await _credit_wallet_if_paid(session_id, request)
+    return {"received": True}
 
 
 # ============================================================

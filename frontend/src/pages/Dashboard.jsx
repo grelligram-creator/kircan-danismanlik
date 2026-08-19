@@ -7,16 +7,17 @@ import Sidebar from "@/components/Sidebar";
 import ChatPanel from "@/components/ChatPanel";
 import ReportPreviewPanel from "@/components/ReportPreviewPanel";
 import TemplateSelectorDialog from "@/components/TemplateSelectorDialog";
-import UpsellDialog from "@/components/UpsellDialog";
+import WalletDialog from "@/components/UpsellDialog";
 import { toast } from "sonner";
 
 export default function Dashboard() {
-  const { user, loading, updateCredits } = useAuth();
+  const { user, loading, updateBalance } = useAuth();
   const [chats, setChats] = useState([]);
   const [activeChat, setActiveChat] = useState(null);
   const [messages, setMessages] = useState([]);
   const [showTemplates, setShowTemplates] = useState(false);
-  const [showUpsell, setShowUpsell] = useState(false);
+  const [showWallet, setShowWallet] = useState(false);
+  const [costs, setCosts] = useState(null);
 
   const loadChats = useCallback(async () => {
     try {
@@ -26,7 +27,10 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    if (user) loadChats();
+    if (user) {
+      loadChats();
+      api.get("/wallet/costs").then((r) => setCosts(r.data)).catch(() => {});
+    }
   }, [user, loadChats]);
 
   const openChat = async (chatId) => {
@@ -52,19 +56,20 @@ export default function Dashboard() {
     }
   };
 
-  const handleMessageSent = (data) => {
-    setMessages((prev) => [...prev, data.user_message, data.assistant_message]);
-    setActiveChat(data.chat);
-    setChats((prev) => prev.map((c) => (c.chat_id === data.chat.chat_id ? data.chat : c)));
-    updateCredits(data.credits);
-    if (data.chat.status === "completed") {
-      toast.success("Rapor tamamlandı!", { description: "Sağ panelden PDF/DOCX indirebilir veya e-posta ile gönderebilirsiniz." });
+  // Streaming callbacks
+  const handleStreamStart = (userMsg) => {
+    setMessages((prev) => [...prev, userMsg]);
+  };
+  const handleStreamDelta = () => {};
+  const handleStreamDone = (evt) => {
+    setMessages((prev) => [...prev, evt.assistant_message]);
+    setActiveChat(evt.chat);
+    setChats((prev) => prev.map((c) => (c.chat_id === evt.chat.chat_id ? evt.chat : c)));
+    updateBalance(evt.wallet_balance);
+    if (evt.chat.status === "completed") {
+      toast.success("Rapor tamamlandı!", { description: "PDF/DOCX indirebilir veya e-posta ile gönderebilirsiniz." });
     }
   };
-
-  const handleLowCredits = () => setShowUpsell(true);
-
-  const handlePurchased = (credits) => updateCredits(credits);
 
   const deleteChat = async (chatId) => {
     try {
@@ -86,6 +91,12 @@ export default function Dashboard() {
   }
   if (!user) return <Navigate to="/" replace />;
 
+  const activeCost = activeChat
+    ? (activeChat.mode === "faq"
+        ? costs?.faq
+        : costs?.templates?.find((t) => t.id === activeChat.template_id)?.cost_per_message)
+    : null;
+
   return (
     <div className="h-screen w-full flex overflow-hidden bg-zinc-50 font-body" data-testid="dashboard">
       <Sidebar
@@ -94,7 +105,7 @@ export default function Dashboard() {
         onNewChat={() => setShowTemplates(true)}
         onSelect={openChat}
         onDelete={deleteChat}
-        onOpenUpsell={() => setShowUpsell(true)}
+        onOpenUpsell={() => setShowWallet(true)}
       />
 
       <div className="flex-1 flex overflow-hidden">
@@ -106,8 +117,11 @@ export default function Dashboard() {
               <ChatPanel
                 chat={activeChat}
                 messages={messages}
-                onMessageSent={handleMessageSent}
-                onLowCredits={handleLowCredits}
+                costPerMessage={activeCost}
+                onStreamStart={handleStreamStart}
+                onStreamDelta={handleStreamDelta}
+                onStreamDone={handleStreamDone}
+                onLowBalance={() => setShowWallet(true)}
               />
             </ResizablePanel>
             <ResizableHandle withHandle />
@@ -123,7 +137,7 @@ export default function Dashboard() {
         onOpenChange={setShowTemplates}
         onSelect={handleTemplateSelect}
       />
-      <UpsellDialog open={showUpsell} onOpenChange={setShowUpsell} onPurchased={handlePurchased} />
+      <WalletDialog open={showWallet} onOpenChange={setShowWallet} />
     </div>
   );
 }

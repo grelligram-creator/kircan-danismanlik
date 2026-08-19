@@ -6,7 +6,8 @@ import { tr } from "date-fns/locale";
 
 export default function Sidebar({ chats, activeChatId, onNewChat, onSelect, onDelete, onOpenUpsell }) {
   const { user, logout } = useAuth();
-  const lowCredits = (user?.credits ?? 0) < 30;
+  const lowBalance = (user?.wallet_balance ?? 0) < 30;
+  const fmtTRY = (n) => `₺${Number(n ?? 0).toLocaleString("tr-TR", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 
   return (
     <aside className="w-72 border-r border-zinc-200 bg-zinc-50 flex flex-col flex-shrink-0" data-testid="sidebar">
@@ -72,20 +73,20 @@ export default function Sidebar({ chats, activeChatId, onNewChat, onSelect, onDe
           data-testid="credits-btn"
           onClick={onOpenUpsell}
           className={`w-full text-left p-3 rounded-md border transition-colors ${
-            lowCredits
+            lowBalance
               ? "border-amber-300 bg-amber-50 hover:bg-amber-100"
               : "border-zinc-200 bg-white hover:border-zinc-950"
           }`}
         >
           <div className="flex items-center justify-between mb-1">
             <div className="flex items-center gap-2">
-              <Wallet className={`w-3.5 h-3.5 ${lowCredits ? "text-amber-600" : "text-zinc-500"}`} />
-              <span className="text-[10px] font-mono uppercase tracking-[0.25em] text-zinc-500">Kredi</span>
+              <Wallet className={`w-3.5 h-3.5 ${lowBalance ? "text-amber-600" : "text-zinc-500"}`} />
+              <span className="text-[10px] font-mono uppercase tracking-[0.25em] text-zinc-500">Cüzdan</span>
             </div>
             <span className="text-[10px] font-mono text-zinc-500">Yükle</span>
           </div>
-          <div className={`font-black text-2xl tracking-tight ${lowCredits ? "text-amber-700" : "text-zinc-950"}`}>
-            {user?.credits ?? 0}
+          <div className={`font-black text-2xl tracking-tight ${lowBalance ? "text-amber-700" : "text-zinc-950"}`}>
+            {fmtTRY(user?.wallet_balance)}
           </div>
         </button>
 

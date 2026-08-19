@@ -35,10 +35,10 @@ export function AuthProvider({ children }) {
   };
 
   const refreshUser = checkAuth;
-  const updateCredits = (credits) => setUser((u) => (u ? { ...u, credits } : u));
+  const updateBalance = (wallet_balance) => setUser((u) => (u ? { ...u, wallet_balance } : u));
 
   return (
-    <AuthContext.Provider value={{ user, setUser, loading, logout, refreshUser, updateCredits }}>
+    <AuthContext.Provider value={{ user, setUser, loading, logout, refreshUser, updateBalance }}>
       {children}
     </AuthContext.Provider>
   );

@@ -2,12 +2,25 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Send, Paperclip, X, FileText, Loader2 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, API } from "@/lib/api";
 import { toast } from "sonner";
 
-export default function ChatPanel({ chat, messages, onMessageSent, onLowCredits }) {
+const fmtTRY = (n) => `₺${Number(n).toLocaleString("tr-TR", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+
+/** Strip <!--UPDATE {...}--> markers before display so user never sees them. */
+function stripUpdateMarker(text) {
+  if (!text) return "";
+  const idx = text.indexOf("<!--UPDATE");
+  if (idx === -1) return text;
+  const end = text.indexOf("-->", idx);
+  if (end === -1) return text.slice(0, idx);
+  return (text.slice(0, idx) + text.slice(end + 3)).trim();
+}
+
+export default function ChatPanel({ chat, messages, onStreamStart, onStreamDelta, onStreamDone, onLowBalance, costPerMessage }) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [streamingText, setStreamingText] = useState("");
   const [attachments, setAttachments] = useState([]);
   const [uploading, setUploading] = useState(false);
   const bottomRef = useRef(null);
@@ -15,7 +28,7 @@ export default function ChatPanel({ chat, messages, onMessageSent, onLowCredits 
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, streamingText]);
 
   const handleUpload = async (e) => {
     const files = Array.from(e.target.files || []);
@@ -30,7 +43,7 @@ export default function ChatPanel({ chat, messages, onMessageSent, onLowCredits 
         });
         setAttachments((prev) => [...prev, data]);
       }
-      toast.success(`${files.length} dosya yüklendi. Göndermek için mesaj yazın.`);
+      toast.success(`${files.length} dosya yüklendi.`);
     } catch {
       toast.error("Dosya yüklenemedi");
     } finally {
@@ -42,23 +55,69 @@ export default function ChatPanel({ chat, messages, onMessageSent, onLowCredits 
   const removeAttachment = (id) => setAttachments((prev) => prev.filter((a) => a.upload_id !== id));
 
   const send = async () => {
+    if (sending) return;
     if (!input.trim() && attachments.length === 0) return;
     setSending(true);
+    setStreamingText("");
     const attachment_ids = attachments.map((a) => a.upload_id);
     const content = input.trim() || "(Ekli dosyaları analiz et)";
     setInput("");
     setAttachments([]);
+
     try {
-      const { data } = await api.post(`/chats/${chat.chat_id}/message`, { content, attachment_ids });
-      onMessageSent?.(data);
-      if (data.low_credit_warning) onLowCredits?.(data.credits);
-    } catch (err) {
-      if (err.response?.status === 402) {
-        toast.error("Kredi bakiyeniz yetersiz", { description: "Kredi paketi satın alarak devam edebilirsiniz." });
-        onLowCredits?.(0);
-      } else {
-        toast.error("Mesaj gönderilemedi");
+      const res = await fetch(`${API}/chats/${chat.chat_id}/message`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content, attachment_ids }),
+      });
+      if (!res.ok) {
+        if (res.status === 402) {
+          toast.error("Bakiye yetersiz", { description: "Cüzdanınıza bakiye eklemeniz gerekiyor." });
+          onLowBalance?.();
+        } else {
+          toast.error(`Sunucu hatası (${res.status})`);
+        }
+        setSending(false);
+        return;
       }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+      let accumulated = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buffer.indexOf("\n\n")) !== -1) {
+          const raw = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          if (!raw.startsWith("data:")) continue;
+          const jsonStr = raw.slice(5).trim();
+          if (!jsonStr) continue;
+          let evt;
+          try { evt = JSON.parse(jsonStr); } catch { continue; }
+
+          if (evt.type === "user_message") {
+            onStreamStart?.(evt.message);
+          } else if (evt.type === "delta") {
+            accumulated += evt.content;
+            setStreamingText(stripUpdateMarker(accumulated));
+            onStreamDelta?.(evt.content);
+          } else if (evt.type === "done") {
+            onStreamDone?.(evt);
+            setStreamingText("");
+            if (evt.low_balance_warning) onLowBalance?.();
+          } else if (evt.type === "error") {
+            toast.error("AI hatası", { description: evt.message });
+          }
+        }
+      }
+    } catch (e) {
+      toast.error("Bağlantı hatası", { description: String(e) });
     } finally {
       setSending(false);
     }
@@ -79,17 +138,22 @@ export default function ChatPanel({ chat, messages, onMessageSent, onLowCredits 
           {messages.map((m) => (
             <MessageBubble key={m.message_id} message={m} />
           ))}
-          {sending && (
+          {streamingText && (
+            <MessageBubble
+              message={{ message_id: "streaming", role: "assistant", content: streamingText }}
+              streaming
+            />
+          )}
+          {sending && !streamingText && (
             <div className="flex items-center gap-2 text-zinc-500 text-sm">
               <Loader2 className="w-4 h-4 animate-spin" />
-              <span className="font-mono uppercase tracking-widest text-xs">Asistan yazıyor...</span>
+              <span className="font-mono uppercase tracking-widest text-xs">Asistan düşünüyor...</span>
             </div>
           )}
           <div ref={bottomRef} />
         </div>
       </div>
 
-      {/* Attachments preview */}
       {attachments.length > 0 && (
         <div className="border-t border-zinc-200 px-6 py-3 bg-zinc-50 flex gap-2 flex-wrap">
           {attachments.map((a) => (
@@ -104,7 +168,6 @@ export default function ChatPanel({ chat, messages, onMessageSent, onLowCredits 
         </div>
       )}
 
-      {/* Input */}
       <div className="border-t border-zinc-200 p-4 bg-white">
         <div className="max-w-2xl mx-auto">
           <div className="border border-zinc-300 rounded-md focus-within:border-zinc-950 transition-colors bg-white">
@@ -115,6 +178,7 @@ export default function ChatPanel({ chat, messages, onMessageSent, onLowCredits 
               onKeyDown={onKeyDown}
               placeholder={chat.mode === "faq" ? "Değerleme hakkında bir soru sorun..." : "Cevabınızı yazın ya da dosya yükleyin..."}
               className="border-0 resize-none focus-visible:ring-0 min-h-[60px] font-body"
+              disabled={sending}
             />
             <div className="flex items-center justify-between px-2 pb-2">
               <input
@@ -131,7 +195,7 @@ export default function ChatPanel({ chat, messages, onMessageSent, onLowCredits 
                 size="sm"
                 data-testid="upload-btn"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={uploading || chat.mode === "faq"}
+                disabled={uploading || sending || chat.mode === "faq"}
                 className="text-zinc-600 hover:text-zinc-950"
               >
                 <Paperclip className="w-4 h-4 mr-1.5" />
@@ -150,7 +214,7 @@ export default function ChatPanel({ chat, messages, onMessageSent, onLowCredits 
             </div>
           </div>
           <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-400 mt-2 text-center">
-            {chat.mode === "faq" ? "5 kredi / mesaj" : "10 kredi / mesaj"} · Claude Sonnet 5
+            Mesaj başı: {costPerMessage != null ? fmtTRY(costPerMessage) : "—"} · Claude Sonnet 5
           </div>
         </div>
       </div>
@@ -158,7 +222,7 @@ export default function ChatPanel({ chat, messages, onMessageSent, onLowCredits 
   );
 }
 
-function MessageBubble({ message }) {
+function MessageBubble({ message, streaming }) {
   const isUser = message.role === "user";
   return (
     <div className={`flex gap-4 ${isUser ? "flex-row-reverse" : ""}`}>
@@ -173,7 +237,10 @@ function MessageBubble({ message }) {
             ? "bg-zinc-950 text-white"
             : "bg-zinc-50 border border-zinc-200 text-zinc-900"
         }`}>
-          <div className="whitespace-pre-wrap text-sm leading-relaxed font-body">{message.content}</div>
+          <div className="whitespace-pre-wrap text-sm leading-relaxed font-body">
+            {stripUpdateMarker(message.content)}
+            {streaming && <span className="inline-block w-1.5 h-4 ml-0.5 bg-zinc-400 align-middle animate-pulse" />}
+          </div>
           {message.attachments?.length > 0 && (
             <div className="mt-2 pt-2 border-t border-white/20 flex flex-wrap gap-1">
               {message.attachments.map((a) => (

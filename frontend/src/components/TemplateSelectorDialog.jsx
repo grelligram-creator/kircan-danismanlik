@@ -44,7 +44,7 @@ export default function TemplateSelectorDialog({ open, onOpenChange, onSelect })
                     <Icon className="w-4 h-4" />
                   </div>
                   <span className="text-[10px] font-mono uppercase tracking-widest text-zinc-400">
-                    {t.credit_cost}+ kredi
+                    ₺{t.cost_per_message}/msg
                   </span>
                 </div>
                 <div className="font-medium text-zinc-950 mb-1">{t.name}</div>

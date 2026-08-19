@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 4 — focused testing of v6 custom Word template management. Backend: 10 pytest cases in /app/backend/tests/test_user_templates.py all pass (upload+LLM detection, list/get/404/auth, PATCH persistence + type sanitization, /api/templates custom_templates, chat creation greeting, preview ph-empty/ph-filled, image upload + <img> injection, docxtpl download with word/media + filled values, PDF-blocked 400, delete). Frontend: /templates page, field editor dialog, sidebar quick buttons, template selector 'Word Kütüphaneniz' section, custom mammoth preview with amber/green placeholders, image slot file-chooser upload, AI message field fill, and .docx download all verified via Playwright. No blocking defects; two security scoping gaps and one date-format nit reported.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/user_templates, GET /api/user_templates/{id}, GET /api/user_templates/{id}/preview, GET /api/templates", "issue": "No user_id scoping — any authenticated user can list/read/preview and start chats with ANY user's uploaded template (find({}) with no user filter). PATCH/DELETE do check ownership, so the model is inconsistent. Multi-tenant data leak."},
+      {"endpoint": "GET /api/uploads/file/{upload_id}", "issue": "No authentication/ownership check — verified 200 for an unauthenticated curl on another user's uploaded image (IDOR). Preview <img> needs it public, so consider a signed/opaque token or cookie-auth check."},
+      {"endpoint": "user_templates preview HTML", "issue": "preview_html emits relative image src '/api/uploads/file/...'; works only because frontend and backend share the origin. Should be built from an absolute backend URL for robustness."},
+      {"endpoint": "POST /api/chats (user_template)", "issue": "Date fields are stored normalized to ISO (typed '15.08.2026' -> preview shows '2026-08-15'). For a Turkish Word report the rendered value should likely stay dd.MM.yyyy."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Custom template preview (ReportPreviewPanel)", "issues": ["Contrast is fine (amber #fef3c7/#92400e, green #dcfce7/#14532d). Only nit: filled image slot chip switches to green but no thumbnail/remove affordance to replace a wrongly uploaded image."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_user_templates.py",
+    "/app/test_reports/pytest/user_templates.xml"
+  ],
+  "action_items": [
+    "Scope user_templates list/get/preview (and /api/templates custom_templates) to the requesting user_id, and reject chat creation with someone else's user_template_id.",
+    "Protect GET /api/uploads/file/{upload_id} (auth or unguessable signed URL) — currently open IDOR.",
+    "Return absolute (env-based) URLs for preview image src instead of relative /api paths.",
+    "Decide date rendering format for custom templates (Turkish dd.MM.yyyy vs ISO).",
+    "Optional: allow replacing/removing an uploaded image slot value from the preview bar."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1390 lines — split user_templates endpoints into a dedicated router module.",
+    "`import shutil` sits at line 394 (mid-file, after being used in delete_user_template) — move to the top imports.",
+    "apply_placeholders line 240: `p.runs[0].text = token if p.runs else p.add_run(token).text` is dead/confusing (the guard is already false when p.runs is empty) followed by a redundant `if not p.runs` block — simplify.",
+    "render_docx relies on Jinja default Undefined for unfilled keys; add an explicit context default per field so a future StrictUndefined/typo doesn't 500 the download."
+  ],
+  "updated_files": ["/app/backend/tests/test_user_templates.py"],
+  "success_rate": {"backend": "100% (10/10)", "frontend": "100% of tested flows"},
+  "seed_data_creation": "Reused seeded template 'Test Konut Şablonu' (11 fields). Uploaded + deleted one TEST_Upload Sablonu docx (1 LLM call). Test chats created by pytest were deleted; 1-2 UI-created chats with a 1x1 TEST png remain in the sidebar.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "session_token=test_session_seed_001 (cookie or Bearer), user_id=test-user-seed-001",
+  "context_for_next_testing_agent": "Run /app/backend/tests/test_user_templates.py with -n 0; the upload test costs 1 Claude call (deselect with -k 'not upload_detect' to skip). Preview/chat/image/download all validated against the seeded utpl template. Playwright auth = add cookie session_token before goto. Remaining open items are ownership scoping on user_templates and IDOR on /api/uploads/file.",
+  "rca_of_the_issue": "No functional defect found. Scoping gaps stem from db.user_templates.find({}) / find_one({template_id}) queries omitting user_id, while PATCH/DELETE add an explicit owner check; serve_upload intentionally has no Depends(get_current_user) so that preview <img> tags load, which exposes any upload_id publicly."
+}

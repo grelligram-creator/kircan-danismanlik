@@ -5,6 +5,7 @@ import Login from "@/pages/Login";
 import Dashboard from "@/pages/Dashboard";
 import AuthCallback from "@/pages/AuthCallback";
 import Analytics from "@/pages/Analytics";
+import TemplateManager from "@/pages/TemplateManager";
 import { PaymentSuccess, PaymentCancel } from "@/pages/Payment";
 import { Toaster } from "@/components/ui/sonner";
 
@@ -19,6 +20,7 @@ function AppRouter() {
       <Route path="/" element={<RootRoute />} />
       <Route path="/dashboard" element={<Dashboard />} />
       <Route path="/analytics" element={<Analytics />} />
+      <Route path="/templates" element={<TemplateManager />} />
       <Route path="/payment/success" element={<PaymentSuccess />} />
       <Route path="/payment/cancel" element={<PaymentCancel />} />
       <Route path="*" element={<Navigate to="/" replace />} />

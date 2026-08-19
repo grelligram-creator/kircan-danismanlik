@@ -55,6 +55,15 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - **Trend comparison**: analytics response now includes `trends` block computing % delta of each KPI vs the previous same-length window (7d compared to prior 7d, custom compared to prior custom, etc.). Also returns `prev_date_from` / `prev_date_to`.
 - **Semantic KPI badges**: `▲ %87,5` (red for cost increase / green for activity increase), `▼` inverse, `— yeni` when no baseline. Tooltip reveals previous-period raw value.
 
+## Implemented (v6 — Feb 2026)
+- **Custom Word template management**: user uploads a `.docx`, Claude Sonnet 5 auto-detects fillable placeholders (`____`, `[YAZINIZ]`, image slots, table cells) with types (text/number/date/textarea/image). Backend injects `{{ key }}` Jinja tokens into a prepared copy while preserving all original Word formatting (fonts, headings, tables). Templates library page (`/templates`) supports upload + field editor + delete.
+- **User templates in chat**: New Chat picker shows a "Word Kütüphaneniz" section alongside built-in templates. Chat greeting adapts to the custom template.
+- **Live in-app preview**: `ReportPreviewPanel` renders mammoth-converted HTML with amber `.ph-empty` chips for unfilled placeholders and green `.ph-filled` chips for filled values, updating as fields come in. Preview reflects the exact Word structure.
+- **Image slots**: `image` type fields render as an "Image Slot Bar" with per-slot upload buttons; uploaded images embed inline in preview HTML and in the final docxtpl-rendered .docx (via `InlineImage`).
+- **Final download**: DOCX rendered via `docxtpl` preserves original Word styles, headings, tables, images.
+- **Security**: user_templates queries scoped to owner; `/api/uploads/file/{id}` requires auth + ownership.
+- Testing agent iteration_4: **10/10 backend + full UI verified**. Security scoping gaps fixed post-report.
+
 ## Prioritized Backlog
 ### P0 (blocking full production)
 - Real Stripe/Iyzico payment integration for credit packages (currently MOCK)

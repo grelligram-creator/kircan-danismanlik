@@ -5,11 +5,13 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import os
+import re
 import uuid
+import shutil
 import json
 import logging
 import asyncio
@@ -202,8 +204,14 @@ async def logout(response: Response, session_token: Optional[str] = Cookie(defau
 # ============================================================
 
 @api.get("/templates")
-async def list_templates():
-    return {"templates": REPORT_TEMPLATES}
+async def list_templates(user: User = Depends(get_current_user)):
+    """Return built-in templates + user's own custom templates."""
+    custom_cursor = db.user_templates.find({"user_id": user.user_id}, {"_id": 0}).sort("created_at", -1)
+    custom = await custom_cursor.to_list(200)
+    for c in custom:
+        c.pop("original_docx_path", None)
+        c.pop("prepared_docx_path", None)
+    return {"templates": REPORT_TEMPLATES, "custom_templates": custom}
 
 
 @api.get("/faq")
@@ -212,11 +220,196 @@ async def list_faq():
 
 
 # ============================================================
+# User Templates (custom DOCX with AI-detected placeholders)
+# ============================================================
+
+from template_utils import (
+    extract_document_map, detect_placeholders_via_llm,
+    apply_placeholders, render_docx, docx_to_html, preview_html,
+)
+
+TEMPLATES_DIR = ROOT_DIR / "user_templates"
+TEMPLATES_DIR.mkdir(exist_ok=True)
+
+
+async def _claude_call(system: str, user_text: str) -> str:
+    llm = LlmChat(
+        api_key=EMERGENT_LLM_KEY,
+        session_id=f"tpl_detect_{uuid.uuid4().hex[:8]}",
+        system_message=system,
+    ).with_model("anthropic", "claude-sonnet-5")
+    resp = await llm.send_message(UserMessage(text=user_text))
+    return resp.content if hasattr(resp, "content") else str(resp)
+
+
+async def _get_user_template(tid: str) -> Optional[Dict[str, Any]]:
+    return await db.user_templates.find_one({"template_id": tid}, {"_id": 0})
+
+
+@api.post("/user_templates/upload")
+async def upload_user_template(
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    description: str = Form(""),
+    user: User = Depends(get_current_user),
+):
+    """Upload a .docx template. Backend AI-detects placeholders and prepares a Jinja-tokenized copy."""
+    if not file.filename.lower().endswith(".docx"):
+        raise HTTPException(status_code=400, detail="Sadece .docx dosyaları desteklenir")
+
+    tid = f"utpl_{uuid.uuid4().hex[:12]}"
+    tdir = TEMPLATES_DIR / tid
+    tdir.mkdir(parents=True, exist_ok=True)
+    original_path = tdir / "original.docx"
+    prepared_path = tdir / "prepared.docx"
+    content = await file.read()
+    original_path.write_bytes(content)
+
+    # 1. extract structure
+    doc_map = extract_document_map(str(original_path))
+    # 2. detect placeholders via Claude
+    try:
+        fields = await detect_placeholders_via_llm(doc_map, _claude_call)
+    except Exception as e:
+        logger.exception("Placeholder detection failed")
+        raise HTTPException(status_code=500, detail=f"AI tespit hatası: {e}")
+    # 3. inject Jinja tokens into a prepared copy
+    summary = apply_placeholders(str(original_path), str(prepared_path), fields)
+
+    doc_record = {
+        "template_id": tid,
+        "user_id": user.user_id,
+        "name": name.strip() or file.filename,
+        "description": description.strip(),
+        "filename": file.filename,
+        "original_docx_path": str(original_path),
+        "prepared_docx_path": str(prepared_path),
+        "fields": fields,
+        "detection_summary": summary,
+        "kind": "user",
+        "cost_per_message": 5.0,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.user_templates.insert_one(doc_record)
+    doc_record.pop("_id", None)
+    return {
+        "template": {
+            **{k: v for k, v in doc_record.items() if k not in ("original_docx_path", "prepared_docx_path")},
+        },
+    }
+
+
+@api.get("/user_templates")
+async def list_user_templates(user: User = Depends(get_current_user)):
+    cursor = db.user_templates.find({"user_id": user.user_id}, {"_id": 0, "original_docx_path": 0, "prepared_docx_path": 0}).sort("created_at", -1)
+    items = await cursor.to_list(500)
+    return {"templates": items}
+
+
+@api.get("/user_templates/{tid}")
+async def get_user_template(tid: str, user: User = Depends(get_current_user)):
+    t = await _get_user_template(tid)
+    if not t or t.get("user_id") != user.user_id:
+        raise HTTPException(status_code=404, detail="Template not found")
+    t.pop("original_docx_path", None)
+    t.pop("prepared_docx_path", None)
+    return t
+
+
+@api.patch("/user_templates/{tid}")
+async def update_user_template(tid: str, payload: Dict[str, Any], user: User = Depends(get_current_user)):
+    t = await _get_user_template(tid)
+    if not t:
+        raise HTTPException(status_code=404, detail="Template not found")
+    if t.get("user_id") != user.user_id:
+        raise HTTPException(status_code=403, detail="Yalnızca sahibi düzenleyebilir")
+    updates: Dict[str, Any] = {}
+    if "name" in payload:
+        updates["name"] = str(payload["name"]).strip()
+    if "description" in payload:
+        updates["description"] = str(payload["description"]).strip()
+    if "fields" in payload and isinstance(payload["fields"], list):
+        clean_fields: List[Dict[str, Any]] = []
+        for f in payload["fields"]:
+            key = str(f.get("key", "")).strip()
+            key = re.sub(r"[^a-z0-9_]", "_", key.lower())
+            if not key:
+                continue
+            clean_fields.append({
+                "key": key,
+                "label": str(f.get("label", key)).strip() or key,
+                "type": f.get("type") if f.get("type") in ("text", "number", "date", "textarea", "image") else "text",
+                "node_id": f.get("node_id"),
+                "replace_text": f.get("replace_text"),
+                "append_after_label": f.get("append_after_label"),
+                "hint": f.get("hint", ""),
+            })
+        updates["fields"] = clean_fields
+        # Re-apply placeholders on the original to rebuild prepared.docx
+        summary = apply_placeholders(t["original_docx_path"], t["prepared_docx_path"], clean_fields)
+        updates["detection_summary"] = summary
+    if updates:
+        await db.user_templates.update_one({"template_id": tid}, {"$set": updates})
+    updated = await _get_user_template(tid)
+    updated.pop("original_docx_path", None)
+    updated.pop("prepared_docx_path", None)
+    return updated
+
+
+@api.delete("/user_templates/{tid}")
+async def delete_user_template(tid: str, user: User = Depends(get_current_user)):
+    t = await _get_user_template(tid)
+    if not t:
+        raise HTTPException(status_code=404, detail="Template not found")
+    if t.get("user_id") != user.user_id:
+        raise HTTPException(status_code=403, detail="Yalnızca sahibi silebilir")
+    tdir = Path(t["original_docx_path"]).parent
+    try:
+        shutil.rmtree(tdir, ignore_errors=True)
+    except Exception:
+        pass
+    await db.user_templates.delete_one({"template_id": tid})
+    return {"success": True}
+
+
+@api.get("/user_templates/{tid}/preview")
+async def user_template_preview(tid: str, chat_id: Optional[str] = None, user: User = Depends(get_current_user)):
+    """Return HTML preview. If chat_id given, substitute the chat's current field values."""
+    t = await _get_user_template(tid)
+    if not t or t.get("user_id") != user.user_id:
+        raise HTTPException(status_code=404, detail="Template not found")
+    values: Dict[str, Any] = {}
+    image_urls: Dict[str, str] = {}
+    if chat_id:
+        chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
+        if chat:
+            values = dict(chat.get("fields", {}))
+            for k, v in list(values.items()):
+                if isinstance(v, dict) and v.get("__image__"):
+                    image_urls[k] = v.get("preview_url", "")
+                    values.pop(k, None)
+    html = preview_html(t["prepared_docx_path"], values, image_urls)
+    return {"html": html, "fields": t.get("fields", [])}
+
+
+# ============================================================
 # Chat Sessions
 # ============================================================
 
 def _template_by_id(tid: str) -> Optional[Dict[str, Any]]:
     return next((t for t in REPORT_TEMPLATES if t["id"] == tid), None)
+
+
+async def _resolve_template(template_id: Optional[str], user_template_id: Optional[str], user_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Return (builtin_template, user_template). Only one is non-null. User templates must be owned by user_id."""
+    if user_template_id:
+        ut = await _get_user_template(user_template_id)
+        if ut and ut.get("user_id") != user_id:
+            return None, None
+        return None, ut
+    if template_id:
+        return _template_by_id(template_id), None
+    return None, None
 
 
 @api.get("/chats")
@@ -233,10 +426,18 @@ async def list_chats(user: User = Depends(get_current_user)):
 async def create_chat(payload: Dict[str, Any], user: User = Depends(get_current_user)):
     mode = payload.get("mode", "report")
     template_id = payload.get("template_id")
-    template = _template_by_id(template_id) if template_id else None
+    user_template_id = payload.get("user_template_id")
+    builtin, user_tpl = await _resolve_template(template_id, user_template_id, user.user_id)
 
     chat_id = f"chat_{uuid.uuid4().hex[:10]}"
-    title = "FAQ Sohbeti" if mode == "faq" else (template["name"] if template else "Yeni Rapor")
+    if mode == "faq":
+        title = "FAQ Sohbeti"
+    elif user_tpl:
+        title = user_tpl["name"]
+    elif builtin:
+        title = builtin["name"]
+    else:
+        title = "Yeni Rapor"
 
     chat_doc = {
         "chat_id": chat_id,
@@ -244,7 +445,8 @@ async def create_chat(payload: Dict[str, Any], user: User = Depends(get_current_
         "title": title,
         "mode": mode,
         "template_id": template_id,
-        "template_name": template["name"] if template else None,
+        "user_template_id": user_template_id,
+        "template_name": user_tpl["name"] if user_tpl else (builtin["name"] if builtin else None),
         "fields": {},
         "sections": {},
         "status": "in_progress",
@@ -255,11 +457,19 @@ async def create_chat(payload: Dict[str, Any], user: User = Depends(get_current_
     chat_doc.pop("_id", None)
 
     # Seed system + first assistant message
-    if mode == "report" and template:
+    if mode == "report" and user_tpl and user_tpl.get("fields"):
+        first = user_tpl["fields"][0]
         greeting = (
-            f"Merhaba! **{template['name']}** hazırlamanıza yardımcı olacağım. "
+            f"Merhaba! **{user_tpl['name']}** hazırlamanıza yardımcı olacağım.\n\n"
+            f"Bu şablonda **{len(user_tpl['fields'])} alan** tespit edildi. Size sırayla soracağım ve raporu adım adım dolduracağız.\n\n"
+            f"Başlayalım — **{first['label']}** bilgisini paylaşır mısınız?"
+            + (f"\n\n_{first.get('hint','')}_" if first.get("hint") else "")
+        )
+    elif mode == "report" and builtin:
+        greeting = (
+            f"Merhaba! **{builtin['name']}** hazırlamanıza yardımcı olacağım. "
             f"Size gerekli bilgileri sırayla soracağım ve raporu adım adım dolduracağız.\n\n"
-            f"Başlayalım — **{template['fields'][0]['label']}** bilgisini paylaşır mısınız?\n\n"
+            f"Başlayalım — **{builtin['fields'][0]['label']}** bilgisini paylaşır mısınız?\n\n"
             f"Ayrıca ilgili PDF/Word/Excel dosyalarınızı yükleyerek bilgileri otomatik olarak çıkarmama yardımcı olabilirsiniz."
         )
     else:
@@ -302,7 +512,7 @@ async def delete_chat(chat_id: str, user: User = Depends(get_current_user)):
 # Chat Messaging (Claude Sonnet 5)
 # ============================================================
 
-def _build_system_prompt(chat: Dict[str, Any]) -> str:
+def _build_system_prompt(chat: Dict[str, Any], user_tpl: Optional[Dict[str, Any]] = None) -> str:
     if chat["mode"] == "faq":
         faq_text = "\n\n".join([f"S: {q['q']}\nC: {q['a']}" for q in FAQ_ITEMS])
         return (
@@ -311,6 +521,34 @@ def _build_system_prompt(chat: Dict[str, Any]) -> str:
             "Aşağıdaki bilgi bankasından yararlanabilirsin ancak dışına da çıkabilirsin:\n\n"
             + faq_text
         )
+
+    if user_tpl:
+        fields_json = json.dumps(
+            [{"key": f["key"], "label": f["label"], "type": f["type"], "hint": f.get("hint", "")} for f in user_tpl["fields"]],
+            ensure_ascii=False, indent=2,
+        )
+        collected = json.dumps(chat.get("fields", {}), ensure_ascii=False, indent=2)
+        return f"""Sen deneyimli, SPK lisanslı bir gayrimenkul değerleme uzmanısın. Kullanıcının **{user_tpl['name']}** şablonunu doldurmasına yardım ediyorsun.
+
+## Görevin
+1. Aşağıdaki alanları SIRAYLA, tek tek kullanıcıya sor ve topla.
+2. Kullanıcı PDF/Excel/Word yüklediğinde içeriğinden değerleri çıkar.
+3. Görsel (image) tipindeki alanlar için kullanıcıdan fotoğraf yüklemesini iste.
+4. Her cevabından SONRA JSON blok döndür: en sonda `<!--UPDATE-->` etiketi ile birlikte:
+   `<!--UPDATE {{"fields": {{...toplanan_alanlar...}} }}-->`
+5. Tüm alanlar dolduğunda "Rapor tamamlandı" yaz ve `<!--UPDATE {{...status:'completed'}}-->` işaretle.
+
+## Toplanacak Alanlar (JSON şema)
+{fields_json}
+
+## Şu ana kadar toplanan bilgiler
+{collected}
+
+## Kurallar
+- Kısa, net ve profesyonel bir dille yaz.
+- Her cevabın sonunda MUTLAKA `<!--UPDATE {{...}}-->` etiketi olsun (kullanıcı bunu görmez, sistem güncelleme için kullanır).
+- Görsel alanlar için değer olarak sadece "__pending__" koy (fotoğraf ayrıca yüklenecek).
+- Kullanıcı ilgisiz bir şey sorarsa nazikçe rapor akışına geri getir."""
 
     template = _template_by_id(chat.get("template_id", ""))
     if not template:
@@ -366,6 +604,8 @@ def _extract_update(text: str) -> tuple[str, Optional[Dict[str, Any]]]:
 def _cost_for_chat(chat: Dict[str, Any]) -> float:
     if chat["mode"] == "faq":
         return 2.0
+    if chat.get("user_template_id"):
+        return 5.0
     tpl = _template_by_id(chat.get("template_id", "")) if chat.get("template_id") else None
     return float(tpl["cost_per_message"]) if tpl else 5.0
 
@@ -432,7 +672,7 @@ async def send_message(
     await db.messages.insert_one(user_msg)
     user_msg.pop("_id", None)
 
-    system_prompt = _build_system_prompt(chat)
+    system_prompt = _build_system_prompt(chat, user_tpl=(await _get_user_template(chat["user_template_id"])) if chat.get("user_template_id") else None)
     llm = LlmChat(
         api_key=EMERGENT_LLM_KEY,
         session_id=chat_id,
@@ -499,11 +739,16 @@ async def send_message(
                 new_status = "completed"
 
         tpl = _template_by_id(chat.get("template_id", "")) if chat.get("template_id") else None
+        user_tpl_now = await _get_user_template(chat["user_template_id"]) if chat.get("user_template_id") else None
         if tpl:
             all_fields_done = all(k in new_fields and new_fields[k] not in (None, "")
                                    for k in [f["key"] for f in tpl["fields"]])
             all_sections_done = all(s in new_sections and new_sections[s] for s in tpl["sections"])
             if all_fields_done and all_sections_done:
+                new_status = "completed"
+        elif user_tpl_now:
+            required_keys = [f["key"] for f in user_tpl_now.get("fields", []) if f.get("type") != "image"]
+            if required_keys and all(k in new_fields and new_fields[k] not in (None, "") for k in required_keys):
                 new_status = "completed"
 
         await db.chats.update_one(
@@ -555,6 +800,54 @@ async def upload_file(file: UploadFile = File(...), user: User = Depends(get_cur
     return doc
 
 
+@api.post("/chats/{chat_id}/image")
+async def chat_upload_image(
+    chat_id: str,
+    field_key: str = Form(...),
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+):
+    """Attach an image to a user-template image field in the given chat."""
+    chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if not chat.get("user_template_id"):
+        raise HTTPException(status_code=400, detail="Görsel yükleme yalnızca özel şablonlarda destekleniyor")
+    ct = (file.content_type or "").lower()
+    if not ct.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Yalnızca görsel dosyalar kabul edilir")
+
+    upload_id = f"img_{uuid.uuid4().hex[:12]}"
+    safe_name = file.filename.replace("/", "_").replace("\\", "_")
+    path = UPLOAD_DIR / f"{upload_id}_{safe_name}"
+    content = await file.read()
+    path.write_bytes(content)
+    # Public URL for preview (served via /api/uploads/file/{upload_id})
+    preview_url = f"/api/uploads/file/{upload_id}"
+
+    await db.uploads.insert_one({
+        "upload_id": upload_id, "user_id": user.user_id, "filename": safe_name,
+        "path": str(path), "size": len(content), "kind": "image",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    # Update chat.fields[field_key] with image payload
+    new_fields = dict(chat.get("fields", {}))
+    new_fields[field_key] = {"__image__": True, "path": str(path), "preview_url": preview_url, "filename": safe_name}
+    await db.chats.update_one({"chat_id": chat_id}, {"$set": {"fields": new_fields}})
+    return {"success": True, "field_key": field_key, "preview_url": preview_url, "filename": safe_name}
+
+
+@api.get("/uploads/file/{upload_id}")
+async def serve_upload(upload_id: str, user: User = Depends(get_current_user)):
+    doc = await db.uploads.find_one({"upload_id": upload_id}, {"_id": 0})
+    if not doc or doc.get("user_id") != user.user_id:
+        raise HTTPException(status_code=404, detail="Not found")
+    p = Path(doc["path"])
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="File missing")
+    return FileResponse(str(p), filename=doc.get("filename", p.name))
+
+
 # ============================================================
 # Report Generation & Download
 # ============================================================
@@ -578,6 +871,33 @@ async def download_report(chat_id: str, fmt: str, user: User = Depends(get_curre
     chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
+
+    # User template path: docxtpl-based rendering preserves original Word formatting
+    if chat.get("user_template_id") and fmt == "docx":
+        ut = await _get_user_template(chat["user_template_id"])
+        if not ut:
+            raise HTTPException(status_code=404, detail="Template not found")
+        values = dict(chat.get("fields", {}))
+        # Split out image fields (values like {"__image__": true, "path": "..."})
+        image_paths: Dict[str, str] = {}
+        clean_values: Dict[str, Any] = {}
+        for k, v in values.items():
+            if isinstance(v, dict) and v.get("__image__") and v.get("path"):
+                image_paths[k] = v["path"]
+            else:
+                clean_values[k] = v
+        out_dir = REPORTS_DIR / chat_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"rapor_{chat['report_no'] or chat_id}.docx"
+        render_docx(ut["prepared_docx_path"], str(out_path), clean_values, image_paths)
+        return FileResponse(
+            str(out_path),
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename=out_path.name,
+        )
+    if chat.get("user_template_id") and fmt == "pdf":
+        raise HTTPException(status_code=400, detail="Özel şablonlar için şu an sadece DOCX indirilebilir")
+
     payload = _report_payload(chat)
     filename_base = f"rapor_{chat['report_no'] or chat_id}"
     if fmt == "pdf":

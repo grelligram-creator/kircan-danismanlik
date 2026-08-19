@@ -46,7 +46,14 @@ export default function Dashboard() {
   const handleTemplateSelect = async (t) => {
     setShowTemplates(false);
     try {
-      const payload = t?.id ? { mode: "report", template_id: t.id } : { mode: "faq" };
+      let payload;
+      if (t?.user_template_id) {
+        payload = { mode: "report", user_template_id: t.user_template_id };
+      } else if (t?.id) {
+        payload = { mode: "report", template_id: t.id };
+      } else {
+        payload = { mode: "faq" };
+      }
       const { data } = await api.post("/chats", payload);
       setChats((prev) => [data.chat, ...prev]);
       setActiveChat(data.chat);
@@ -94,7 +101,9 @@ export default function Dashboard() {
   const activeCost = activeChat
     ? (activeChat.mode === "faq"
         ? costs?.faq
-        : costs?.templates?.find((t) => t.id === activeChat.template_id)?.cost_per_message)
+        : activeChat.user_template_id
+          ? 5.0
+          : costs?.templates?.find((t) => t.id === activeChat.template_id)?.cost_per_message)
     : null;
 
   return (

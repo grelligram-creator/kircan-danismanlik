@@ -28,3 +28,23 @@ h1, h2, h3, h4 {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #d4d4d8; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #a1a1aa; }
+
+/* Word document preview (mammoth-generated HTML) */
+.doc-preview { color: #1a1a1a; font-family: "IBM Plex Sans", system-ui, sans-serif; line-height: 1.6; }
+.doc-preview h1.doc-title { font-family: "Manrope", sans-serif; font-size: 1.75rem; letter-spacing: -0.02em; font-weight: 300; margin-bottom: 1.25rem; }
+.doc-preview h2.doc-h1 { font-family: "Manrope", sans-serif; font-size: 1.25rem; margin-top: 1.5rem; margin-bottom: 0.75rem; border-left: 2px solid #0a0a0a; padding-left: 0.75rem; }
+.doc-preview h3.doc-h2 { font-family: "Manrope", sans-serif; font-size: 1rem; margin-top: 1rem; margin-bottom: 0.5rem; color: #52525b; }
+.doc-preview p { margin: 0.35rem 0; font-size: 0.9rem; }
+.doc-preview table { width: 100%; border-collapse: collapse; margin: 0.75rem 0; font-size: 0.85rem; }
+.doc-preview table td, .doc-preview table th { border: 1px solid #e4e4e7; padding: 0.4rem 0.6rem; vertical-align: top; }
+.doc-preview table th { background: #f4f4f5; font-weight: 500; text-align: left; }
+.doc-preview .ph-empty {
+  display: inline-block; min-width: 60px; padding: 0 4px;
+  background: #fef3c7; color: #92400e;
+  border-radius: 3px; font-family: "JetBrains Mono", monospace; font-size: 0.75rem;
+}
+.doc-preview .ph-filled {
+  display: inline-block; padding: 0 3px; background: #dcfce7; color: #14532d;
+  border-radius: 3px; font-weight: 500;
+}
+.doc-preview img { display: block; margin: 0.5rem 0; max-width: 100%; }

@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { Plus, MessageSquare, HelpCircle, LogOut, Wallet, Building2, Trash2, BarChart3 } from "lucide-react";
+import { Plus, MessageSquare, HelpCircle, LogOut, Wallet, Building2, Trash2, BarChart3, FileStack } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { useNavigate } from "react-router-dom";
 import { formatDistanceToNow } from "date-fns";
@@ -71,15 +71,24 @@ export default function Sidebar({ chats, activeChatId, onNewChat, onSelect, onDe
       </div>
 
       <div className="p-3 border-t border-zinc-200 space-y-3">
-        <button
-          data-testid="analytics-btn"
-          onClick={() => navigate("/analytics")}
-          className="w-full flex items-center gap-2 text-left px-2.5 py-2 rounded-md border border-zinc-200 bg-white hover:border-zinc-950 transition-colors text-sm text-zinc-900"
-        >
-          <BarChart3 className="w-3.5 h-3.5 text-zinc-500" />
-          <span>Kullanım Analitiği</span>
-          <span className="ml-auto text-[10px] font-mono uppercase tracking-widest text-zinc-400">30G</span>
-        </button>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            data-testid="templates-btn"
+            onClick={() => navigate("/templates")}
+            className="flex items-center gap-1.5 justify-center px-2 py-2 rounded-md border border-zinc-200 bg-white hover:border-zinc-950 transition-colors text-xs text-zinc-900"
+          >
+            <FileStack className="w-3.5 h-3.5 text-zinc-500" />
+            <span>Şablonlar</span>
+          </button>
+          <button
+            data-testid="analytics-btn"
+            onClick={() => navigate("/analytics")}
+            className="flex items-center gap-1.5 justify-center px-2 py-2 rounded-md border border-zinc-200 bg-white hover:border-zinc-950 transition-colors text-xs text-zinc-900"
+          >
+            <BarChart3 className="w-3.5 h-3.5 text-zinc-500" />
+            <span>Analitik</span>
+          </button>
+        </div>
 
         <button
           data-testid="credits-btn"

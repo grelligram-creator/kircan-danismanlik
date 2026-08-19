@@ -341,6 +341,65 @@ async def share_user_template(tid: str, payload: Dict[str, Any], user: User = De
     return {"shared_with": current}
 
 
+@api.get("/user_templates/{tid}/versions")
+async def list_template_versions(tid: str, user: User = Depends(get_current_user)):
+    t = await _get_user_template(tid)
+    if not t or t.get("user_id") != user.user_id:
+        raise HTTPException(status_code=404, detail="Template not found")
+    cursor = db.template_versions.find(
+        {"template_id": tid},
+        {"_id": 0, "prepared_snapshot_path": 0},
+    ).sort("created_at", -1).limit(50)
+    versions = await cursor.to_list(50)
+    return {"versions": versions}
+
+
+@api.post("/user_templates/{tid}/versions/{vid}/restore")
+async def restore_template_version(tid: str, vid: str, user: User = Depends(get_current_user)):
+    t = await _get_user_template(tid)
+    if not t or t.get("user_id") != user.user_id:
+        raise HTTPException(status_code=404, detail="Template not found")
+    v = await db.template_versions.find_one({"template_id": tid, "version_id": vid}, {"_id": 0})
+    if not v:
+        raise HTTPException(status_code=404, detail="Version not found")
+
+    # Save a "pre-restore" snapshot so restore itself is undoable
+    current_ver = {
+        "version_id": f"ver_{uuid.uuid4().hex[:10]}",
+        "template_id": tid, "user_id": user.user_id,
+        "name": t.get("name"), "description": t.get("description"),
+        "fields": t.get("fields", []), "detection_summary": t.get("detection_summary"),
+        "note": f"Auto-snapshot before restoring {vid}",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    src_prep = Path(t["prepared_docx_path"])
+    if src_prep.exists():
+        snap = src_prep.parent / f"prepared_{current_ver['version_id']}.docx"
+        try:
+            shutil.copy2(str(src_prep), str(snap))
+            current_ver["prepared_snapshot_path"] = str(snap)
+        except Exception:
+            pass
+    await db.template_versions.insert_one(current_ver)
+
+    # Restore fields + rebuild prepared.docx from original + those fields
+    fields = v.get("fields", [])
+    summary = apply_placeholders(t["original_docx_path"], t["prepared_docx_path"], fields)
+    await db.user_templates.update_one(
+        {"template_id": tid},
+        {"$set": {
+            "name": v.get("name") or t["name"],
+            "description": v.get("description") or t.get("description", ""),
+            "fields": fields,
+            "detection_summary": summary,
+        }},
+    )
+    updated = await _get_user_template(tid)
+    updated.pop("original_docx_path", None)
+    updated.pop("prepared_docx_path", None)
+    return updated
+
+
 @api.patch("/user_templates/{tid}")
 async def update_user_template(tid: str, payload: Dict[str, Any], user: User = Depends(get_current_user)):
     t = await _get_user_template(tid)
@@ -348,6 +407,28 @@ async def update_user_template(tid: str, payload: Dict[str, Any], user: User = D
         raise HTTPException(status_code=404, detail="Template not found")
     if t.get("user_id") != user.user_id:
         raise HTTPException(status_code=403, detail="Yalnızca sahibi düzenleyebilir")
+
+    # Snapshot current state before we mutate
+    version = {
+        "version_id": f"ver_{uuid.uuid4().hex[:10]}",
+        "template_id": tid,
+        "user_id": user.user_id,
+        "name": t.get("name"),
+        "description": t.get("description"),
+        "fields": t.get("fields", []),
+        "detection_summary": t.get("detection_summary"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    # Save prepared.docx snapshot next to it
+    src_prep = Path(t["prepared_docx_path"])
+    if src_prep.exists():
+        snap_path = src_prep.parent / f"prepared_{version['version_id']}.docx"
+        try:
+            shutil.copy2(str(src_prep), str(snap_path))
+            version["prepared_snapshot_path"] = str(snap_path)
+        except Exception:
+            pass
+    await db.template_versions.insert_one(version)
     updates: Dict[str, Any] = {}
     if "name" in payload:
         updates["name"] = str(payload["name"]).strip()
@@ -923,21 +1004,82 @@ async def chat_upload_image(
 
 @api.patch("/chats/{chat_id}/image/{field_key}")
 async def chat_update_image(chat_id: str, field_key: str, payload: Dict[str, Any], user: User = Depends(get_current_user)):
-    """Update image metadata (width_mm) for a previously uploaded image field."""
+    """Update image metadata for a previously uploaded image field.
+
+    Payload keys (all optional):
+      - width_mm: number (20..170)
+      - aspect_ratio: "16:9" | "4:3" | "1:1" | "3:4" | "original" — center-crop to that ratio
+      - crop: {left, top, right, bottom} in pixel coords — explicit crop rectangle
+    """
     chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
     fields = dict(chat.get("fields", {}))
-    if not (isinstance(fields.get(field_key), dict) and fields[field_key].get("__image__")):
+    val = fields.get(field_key)
+    if not (isinstance(val, dict) and val.get("__image__")):
         raise HTTPException(status_code=404, detail="Image field not found")
-    try:
-        w = float(payload.get("width_mm", 80))
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="width_mm must be a number")
-    w = max(20.0, min(170.0, w))  # clamp to A4 page bounds
-    fields[field_key]["width_mm"] = w
-    await db.chats.update_one({"chat_id": chat_id}, {"$set": {"fields": fields}})
-    return {"success": True, "field_key": field_key, "width_mm": w}
+
+    updates: Dict[str, Any] = {}
+    if "width_mm" in payload:
+        try:
+            w = float(payload["width_mm"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="width_mm must be a number")
+        updates["width_mm"] = max(20.0, min(170.0, w))
+
+    ar = payload.get("aspect_ratio")
+    crop = payload.get("crop")
+    if ar or crop:
+        from PIL import Image
+        try:
+            im = Image.open(val["path"])
+            im.load()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Görsel açılamadı")
+
+        if crop and isinstance(crop, dict):
+            L = max(0, int(crop.get("left", 0)))
+            T = max(0, int(crop.get("top", 0)))
+            R = min(im.width, int(crop.get("right", im.width)))
+            B = min(im.height, int(crop.get("bottom", im.height)))
+            if R <= L or B <= T:
+                raise HTTPException(status_code=400, detail="Geçersiz kırpma koordinatları")
+            im = im.crop((L, T, R, B))
+        elif ar and ar != "original":
+            try:
+                aw, ah = [float(x) for x in str(ar).split(":")]
+                target = aw / ah
+            except Exception:
+                raise HTTPException(status_code=400, detail="Geçersiz aspect_ratio (16:9 gibi)")
+            cur = im.width / im.height
+            if cur > target:
+                new_w = int(im.height * target)
+                left = (im.width - new_w) // 2
+                im = im.crop((left, 0, left + new_w, im.height))
+            elif cur < target:
+                new_h = int(im.width / target)
+                top = (im.height - new_h) // 2
+                im = im.crop((0, top, im.width, top + new_h))
+        # Save cropped image, overwriting the original path
+        try:
+            fmt = "PNG" if val["path"].lower().endswith(".png") else "JPEG"
+            if fmt == "JPEG" and im.mode in ("RGBA", "P"):
+                im = im.convert("RGB")
+            im.save(val["path"], fmt, quality=92)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Kaydedilemedi: {e}")
+        # Bust cache: assign a new preview_url query param
+        base = val.get("preview_url", "").split("?")[0]
+        updates["preview_url"] = f"{base}?v={uuid.uuid4().hex[:6]}"
+        updates["crop_applied"] = ar or "custom"
+        updates["width_px"] = im.width
+        updates["height_px"] = im.height
+
+    if updates:
+        val.update(updates)
+        fields[field_key] = val
+        await db.chats.update_one({"chat_id": chat_id}, {"$set": {"fields": fields}})
+    return {"success": True, "field_key": field_key, **updates}
 
 
 @api.patch("/chats/{chat_id}/table/{field_key}")

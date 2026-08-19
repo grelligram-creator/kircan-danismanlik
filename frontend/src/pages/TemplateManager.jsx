@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ArrowLeft, Upload, FileText, Trash2, Edit3, Loader2, Plus, X, Sparkles, Share2, Users } from "lucide-react";
+import { ArrowLeft, Upload, FileText, Trash2, Edit3, Loader2, Plus, X, Sparkles, Share2, Users, History } from "lucide-react";
 import { toast } from "sonner";
 
 const FIELD_TYPES = [
@@ -24,6 +24,7 @@ export default function TemplateManager() {
   const [uploading, setUploading] = useState(false);
   const [editing, setEditing] = useState(null);
   const [sharing, setSharing] = useState(null);
+  const [versioning, setVersioning] = useState(null);
   const fileRef = useRef(null);
   const [meta, setMeta] = useState({ name: "", description: "" });
   const navigate = useNavigate();
@@ -211,6 +212,9 @@ export default function TemplateManager() {
                           <Button variant="ghost" size="sm" onClick={() => setSharing(t)} data-testid={`share-${t.template_id}`} title="Paylaş">
                             <Share2 className="w-3.5 h-3.5" />
                           </Button>
+                          <Button variant="ghost" size="sm" onClick={() => setVersioning(t)} data-testid={`versions-${t.template_id}`} title="Sürümler">
+                            <History className="w-3.5 h-3.5" />
+                          </Button>
                           <Button variant="ghost" size="sm" onClick={() => setEditing(t)} data-testid={`edit-${t.template_id}`}>
                             <Edit3 className="w-3.5 h-3.5" />
                           </Button>
@@ -238,7 +242,81 @@ export default function TemplateManager() {
       {sharing && (
         <ShareDialog template={sharing} onClose={() => setSharing(null)} onSaved={() => { setSharing(null); load(); }} />
       )}
+      {versioning && (
+        <VersionsDialog template={versioning} onClose={() => setVersioning(null)} onRestored={() => { setVersioning(null); load(); }} />
+      )}
     </div>
+  );
+}
+
+function VersionsDialog({ template, onClose, onRestored }) {
+  const [versions, setVersions] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [restoring, setRestoring] = useState(null);
+
+  useEffect(() => {
+    api.get(`/user_templates/${template.template_id}/versions`)
+      .then((r) => setVersions(r.data.versions))
+      .catch(() => toast.error("Sürümler yüklenemedi"))
+      .finally(() => setLoading(false));
+  }, [template.template_id]);
+
+  const restore = async (vid) => {
+    if (!confirm("Bu sürüme geri dönmek istediğinize emin misiniz? Mevcut durum otomatik olarak yedeklenecek.")) return;
+    setRestoring(vid);
+    try {
+      await api.post(`/user_templates/${template.template_id}/versions/${vid}/restore`);
+      toast.success("Sürüm geri yüklendi");
+      onRestored();
+    } catch {
+      toast.error("Geri yükleme başarısız");
+    } finally { setRestoring(null); }
+  };
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-xl bg-white" data-testid="versions-dialog">
+        <DialogHeader>
+          <div className="flex items-center gap-2 text-zinc-500 mb-1">
+            <History className="w-4 h-4" />
+            <span className="text-[10px] font-mono uppercase tracking-[0.25em]">Sürüm Geçmişi</span>
+          </div>
+          <DialogTitle className="text-2xl tracking-tight font-light">{template.name}</DialogTitle>
+          <DialogDescription>Her düzenleme veya alan güncellemesinde otomatik bir sürüm kaydedilir. İstediğiniz sürüme geri dönebilirsiniz.</DialogDescription>
+        </DialogHeader>
+        <div className="max-h-96 overflow-y-auto space-y-2">
+          {loading && <div className="text-sm text-zinc-500 italic py-4 text-center">Yükleniyor...</div>}
+          {!loading && versions.length === 0 && (
+            <div className="text-sm text-zinc-500 italic py-4 text-center">Henüz sürüm yok. Alan editöründe bir değişiklik yaptığınızda ilk sürüm oluşacak.</div>
+          )}
+          {versions.map((v) => (
+            <div key={v.version_id} className="flex items-center justify-between p-3 border border-zinc-200 rounded-md" data-testid={`version-${v.version_id}`}>
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-zinc-950 truncate">
+                  {v.name || template.name}
+                  {v.note && <span className="ml-2 text-[10px] font-mono uppercase tracking-widest text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">Otomatik</span>}
+                </div>
+                <div className="text-[10px] font-mono text-zinc-500 mt-0.5">
+                  {new Date(v.created_at).toLocaleString("tr-TR")} · {v.fields?.length || 0} alan · {v.version_id}
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={restoring === v.version_id}
+                onClick={() => restore(v.version_id)}
+                data-testid={`restore-${v.version_id}`}
+              >
+                {restoring === v.version_id ? "Geri yükleniyor..." : "Geri Yükle"}
+              </Button>
+            </div>
+          ))}
+        </div>
+        <div className="flex justify-end pt-4 border-t border-zinc-200">
+          <Button variant="outline" onClick={onClose}>Kapat</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

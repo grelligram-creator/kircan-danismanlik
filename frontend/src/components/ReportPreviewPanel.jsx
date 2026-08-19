@@ -156,9 +156,11 @@ export default function ReportPreviewPanel({ chat }) {
                 <ImageSlotChip
                   key={f.key}
                   field={f}
+                  chatId={chat.chat_id}
                   value={chat.fields?.[f.key]}
                   onUpload={() => startImageUpload(f.key)}
                   onResize={(w) => resizeImage(f.key, w)}
+                  onCropped={loadCustomPreview}
                   uploading={uploadingImageKey === f.key}
                 />
               ))}
@@ -203,11 +205,24 @@ export default function ReportPreviewPanel({ chat }) {
   );
 }
 
-function ImageSlotChip({ field, value, onUpload, onResize, uploading }) {
+function ImageSlotChip({ field, chatId, value, onUpload, onResize, onCropped, uploading }) {
   const filled = value?.__image__;
   const [open, setOpen] = useState(false);
   const [width, setWidth] = useState(value?.width_mm || 80);
+  const [cropping, setCropping] = useState(false);
   useEffect(() => { if (value?.width_mm) setWidth(value.width_mm); }, [value?.width_mm]);
+
+  const applyAspect = async (ar) => {
+    setCropping(true);
+    try {
+      await api.patch(`/chats/${chatId}/image/${field.key}`, { aspect_ratio: ar });
+      toast.success(`Kırpma uygulandı: ${ar}`);
+      onCropped?.();
+    } catch (e) {
+      toast.error("Kırpma başarısız", { description: e?.response?.data?.detail || "" });
+    } finally { setCropping(false); }
+  };
+
   return (
     <div className="relative inline-block">
       <button
@@ -225,13 +240,35 @@ function ImageSlotChip({ field, value, onUpload, onResize, uploading }) {
         {filled && <span className="text-[10px] font-mono text-emerald-700">·{Math.round(width)}mm</span>}
       </button>
       {open && filled && (
-        <div className="absolute z-20 top-full mt-1 left-0 bg-white border border-zinc-200 rounded-md shadow-lg p-3 w-64" data-testid={`img-resize-${field.key}`}>
+        <div className="absolute z-20 top-full mt-1 left-0 bg-white border border-zinc-200 rounded-md shadow-lg p-3 w-72" data-testid={`img-resize-${field.key}`}>
           <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-500 mb-2">Boyut · {Math.round(width)}mm</div>
           <Slider min={30} max={170} step={5} value={[width]} onValueChange={(v) => setWidth(v[0])} onValueCommit={(v) => onResize(v[0])} />
           <div className="flex justify-between text-[10px] font-mono text-zinc-400 mt-1">
             <span>30mm</span><span>170mm</span>
           </div>
-          <div className="flex gap-2 mt-3">
+
+          <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-500 mt-3 mb-1.5">Otomatik Kırpma</div>
+          <div className="grid grid-cols-5 gap-1" data-testid={`img-crop-${field.key}`}>
+            {[
+              { id: "original", label: "Orj." },
+              { id: "16:9", label: "16:9" },
+              { id: "4:3", label: "4:3" },
+              { id: "1:1", label: "1:1" },
+              { id: "3:4", label: "3:4" },
+            ].map((a) => (
+              <button
+                key={a.id}
+                onClick={() => applyAspect(a.id)}
+                disabled={cropping}
+                data-testid={`crop-${field.key}-${a.id}`}
+                className="text-[10px] font-mono border border-zinc-200 rounded px-1.5 py-1 hover:border-zinc-950 hover:bg-zinc-50 transition-colors disabled:opacity-40"
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex gap-2 mt-3 pt-2 border-t border-zinc-200">
             <Button size="sm" variant="outline" className="flex-1" onClick={onUpload}>Değiştir</Button>
             <Button size="sm" variant="ghost" className="text-zinc-500" onClick={() => setOpen(false)}>Kapat</Button>
           </div>

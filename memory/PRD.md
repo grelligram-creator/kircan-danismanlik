@@ -72,6 +72,12 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - **Security hardening**: `create_chat` rejects unresolved `user_template_id` with 404; `download_report` re-checks visibility; image uploads validate bytes via PIL (rejects corrupt files at ingest instead of failing at render).
 - Testing agent iteration_5: 26/29 backend passed; the 2 HIGH bugs (ACL bypass + preview regex) and image validation gap have all been fixed and re-verified via curl.
 
+## Implemented (v8 — Feb 2026)
+- **Template versioning**: every PATCH `/user_templates/{id}` snapshots current fields + name + description into `template_versions` collection (plus a copy of the prepared.docx binary). New endpoint `GET /user_templates/{id}/versions` lists them and `POST /user_templates/{id}/versions/{vid}/restore` re-applies that version (auto-snapshots the current state first, so restore itself is undoable).
+- **Versions UI**: history icon on each template card opens the Sürüm Geçmişi dialog with per-version "Geri Yükle" buttons; auto-snapshots are visually marked "Otomatik".
+- **Image auto-crop**: `PATCH /api/chats/{id}/image/{key}` extended to accept `aspect_ratio` (16:9 / 4:3 / 1:1 / 3:4 / original) — server crops via PIL center-crop; or explicit `crop {left,top,right,bottom}` pixel rect. Preview URL is cache-busted with a `?v=xxx` query param so the browser re-fetches.
+- **Frontend crop UI**: image resize popup now has a "Otomatik Kırpma" row with 5 preset aspect ratio chips; each triggers server-side crop and refreshes preview + eventually the DOCX render.
+
 ## Prioritized Backlog
 ### P0 (blocking full production)
 - Real Stripe/Iyzico payment integration for credit packages (currently MOCK)

@@ -15,7 +15,7 @@ export default function BrandLogo({ variant = "compact", className = "" }) {
   return (
     <div className={`inline-flex items-center gap-2 ${className}`}>
       <div className="w-8 h-8 rounded-md overflow-hidden flex items-center justify-center bg-[var(--brand-navy)] ring-1 ring-[var(--brand-gold)]/50">
-        <img src="/kircan-logo.jpg" alt="KırCan" className="w-full h-full object-cover" />
+        <img src="/kircan-mark.png" alt="KırCan" className="w-full h-full object-cover" />
       </div>
       <div className="leading-tight">
         <div className="text-xs font-mono uppercase tracking-[0.22em] text-[var(--brand-navy)]">KırCan</div>

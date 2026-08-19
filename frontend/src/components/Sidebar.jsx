@@ -18,7 +18,7 @@ export default function Sidebar({ chats, activeChatId, onNewChat, onSelect, onDe
       <div className="p-4 border-b border-zinc-200">
         <div className="flex items-center gap-2 mb-4">
           <div className="w-9 h-9 rounded-md overflow-hidden bg-[var(--brand-navy)] ring-1 ring-[var(--brand-gold)]/40">
-            <img src="/kircan-logo.jpg" alt="KırCan" className="w-full h-full object-cover" />
+            <img src="/kircan-mark.png" alt="KırCan" className="w-full h-full object-cover" />
           </div>
           <div>
             <div className="text-xs font-mono uppercase tracking-[0.25em] text-[var(--brand-navy)]">KırCan Report AI</div>

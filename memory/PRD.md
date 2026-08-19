@@ -51,6 +51,10 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - **CSV export** (`GET /api/analytics/export.csv?days=|date_from=&date_to=`) with UTF-8 BOM for Excel — includes summary, template breakdown, daily spend, per-message ledger, and top-up history in Turkish
 - Frontend one-click download preserving current filter
 
+## Implemented (v5 — Feb 2026)
+- **Trend comparison**: analytics response now includes `trends` block computing % delta of each KPI vs the previous same-length window (7d compared to prior 7d, custom compared to prior custom, etc.). Also returns `prev_date_from` / `prev_date_to`.
+- **Semantic KPI badges**: `▲ %87,5` (red for cost increase / green for activity increase), `▼` inverse, `— yeni` when no baseline. Tooltip reveals previous-period raw value.
+
 ## Prioritized Backlog
 ### P0 (blocking full production)
 - Real Stripe/Iyzico payment integration for credit packages (currently MOCK)

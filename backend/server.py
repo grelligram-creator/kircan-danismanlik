@@ -655,26 +655,71 @@ async def analytics_summary(
     until_iso = until.isoformat()
     total_days = max(1, (until.date() - since.date()).days)
 
-    # All usage events for user in the window
-    events = await db.usage_events.find(
-        {"user_id": user.user_id, "created_at": {"$gte": since_iso, "$lt": until_iso}},
-        {"_id": 0},
-    ).to_list(20000)
+    # Previous same-length window (for trend comparison)
+    prev_since = since - timedelta(days=total_days)
+    prev_until = since
+    prev_since_iso = prev_since.isoformat()
+    prev_until_iso = prev_until.isoformat()
+
+    async def _load_window(s_iso: str, u_iso: str) -> tuple[list, list, list]:
+        evs = await db.usage_events.find(
+            {"user_id": user.user_id, "created_at": {"$gte": s_iso, "$lt": u_iso}},
+            {"_id": 0},
+        ).to_list(20000)
+        cts = await db.chats.find(
+            {"user_id": user.user_id, "created_at": {"$gte": s_iso, "$lt": u_iso}},
+            {"_id": 0},
+        ).to_list(20000)
+        tps = await db.payment_transactions.find(
+            {"user_id": user.user_id, "credited": True, "credited_at": {"$gte": s_iso, "$lt": u_iso}},
+            {"_id": 0},
+        ).to_list(2000)
+        return evs, cts, tps
+
+    events, chats_win, topups = await _load_window(since_iso, until_iso)
+    prev_events, prev_chats, prev_topups = await _load_window(prev_since_iso, prev_until_iso)
 
     total_spent = round(sum(float(e.get("cost", 0)) for e in events), 2)
     total_messages = len(events)
     report_spend = round(sum(float(e.get("cost", 0)) for e in events if e.get("mode") == "report"), 2)
 
-    # Chat & report stats (window based on chats.created_at ISO string)
-    chats_win = await db.chats.find(
-        {"user_id": user.user_id, "created_at": {"$gte": since_iso, "$lt": until_iso}},
-        {"_id": 0},
-    ).to_list(20000)
+    # Chat & report stats
     reports_completed = sum(1 for c in chats_win if c.get("status") == "completed" and c.get("mode") == "report")
     reports_total = sum(1 for c in chats_win if c.get("mode") == "report")
     faq_count = sum(1 for c in chats_win if c.get("mode") == "faq")
     completion_rate = round((reports_completed / reports_total) * 100, 1) if reports_total else 0.0
     avg_spend_per_report = round(report_spend / reports_completed, 2) if reports_completed else 0.0
+    total_topped_up = float(round(sum(float(t.get("credit_try", 0)) for t in topups), 2))
+
+    # Previous-window stats
+    prev_spent = round(sum(float(e.get("cost", 0)) for e in prev_events), 2)
+    prev_messages = len(prev_events)
+    prev_report_spend = round(sum(float(e.get("cost", 0)) for e in prev_events if e.get("mode") == "report"), 2)
+    prev_reports_completed = sum(1 for c in prev_chats if c.get("status") == "completed" and c.get("mode") == "report")
+    prev_reports_total = sum(1 for c in prev_chats if c.get("mode") == "report")
+    prev_faq = sum(1 for c in prev_chats if c.get("mode") == "faq")
+    prev_completion_rate = round((prev_reports_completed / prev_reports_total) * 100, 1) if prev_reports_total else 0.0
+    prev_avg_spend_per_report = round(prev_report_spend / prev_reports_completed, 2) if prev_reports_completed else 0.0
+    prev_topped_up = float(round(sum(float(t.get("credit_try", 0)) for t in prev_topups), 2))
+
+    def _delta_pct(current: float, previous: float) -> Optional[float]:
+        """% change vs previous window. Returns None if previous is 0 and current is 0."""
+        if previous == 0 and current == 0:
+            return None
+        if previous == 0:
+            return None  # can't compute % from zero baseline; UI shows 'yeni'
+        return round(((current - previous) / previous) * 100, 1)
+
+    trends = {
+        "spent": {"current": total_spent, "previous": prev_spent, "delta_pct": _delta_pct(total_spent, prev_spent)},
+        "messages": {"current": total_messages, "previous": prev_messages, "delta_pct": _delta_pct(total_messages, prev_messages)},
+        "reports_completed": {"current": reports_completed, "previous": prev_reports_completed, "delta_pct": _delta_pct(reports_completed, prev_reports_completed)},
+        "reports_total": {"current": reports_total, "previous": prev_reports_total, "delta_pct": _delta_pct(reports_total, prev_reports_total)},
+        "faq_conversations": {"current": faq_count, "previous": prev_faq, "delta_pct": _delta_pct(faq_count, prev_faq)},
+        "avg_spend_per_report": {"current": avg_spend_per_report, "previous": prev_avg_spend_per_report, "delta_pct": _delta_pct(avg_spend_per_report, prev_avg_spend_per_report)},
+        "completion_rate_pct": {"current": completion_rate, "previous": prev_completion_rate, "delta_pct": _delta_pct(completion_rate, prev_completion_rate)},
+        "topped_up": {"current": total_topped_up, "previous": prev_topped_up, "delta_pct": _delta_pct(total_topped_up, prev_topped_up)},
+    }
 
     # Template breakdown
     template_map: Dict[str, Dict[str, Any]] = {}
@@ -738,17 +783,13 @@ async def analytics_summary(
         d = (since + timedelta(days=i)).date().isoformat()
         daily_series.append({"date": d, "amount": round(daily.get(d, 0.0), 2)})
 
-    # Top-ups (Stripe wallet purchases) in the window
-    topups = await db.payment_transactions.find(
-        {"user_id": user.user_id, "credited": True, "credited_at": {"$gte": since_iso, "$lt": until_iso}},
-        {"_id": 0},
-    ).to_list(1000)
-    total_topped_up = float(round(sum(float(t.get("credit_try", 0)) for t in topups), 2))
-
+    # Top-ups already loaded above (also for previous window trends)
     return {
         "window_days": total_days,
         "date_from": since.date().isoformat(),
         "date_to": (until - timedelta(days=1)).date().isoformat(),
+        "prev_date_from": prev_since.date().isoformat(),
+        "prev_date_to": (prev_until - timedelta(days=1)).date().isoformat(),
         "wallet_balance": user.wallet_balance,
         "totals": {
             "spent": total_spent,
@@ -762,6 +803,7 @@ async def analytics_summary(
             "avg_spend_per_report": avg_spend_per_report,
             "completion_rate_pct": completion_rate,
         },
+        "trends": trends,
         "preferred_template": preferred,
         "template_breakdown": template_breakdown,
         "daily_spend": daily_series,

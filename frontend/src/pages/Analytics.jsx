@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useNavigate, Navigate } from "react-router-dom";
 import { api, API } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
-import { ArrowLeft, TrendingUp, FileText, MessageSquare, Wallet, Target, Building2, Download, CalendarIcon } from "lucide-react";
+import { ArrowLeft, TrendingUp, FileText, MessageSquare, Wallet, Target, Building2, Download, CalendarIcon, ArrowUp, ArrowDown, Minus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar } from "@/components/ui/calendar";
@@ -211,24 +211,32 @@ export default function Analytics() {
                 label="Toplam Harcama"
                 value={fmtTRY(data.totals.spent)}
                 sub={data.totals.topped_up ? `Yüklenen: ${fmtTRY(data.totals.topped_up)}` : "yükleme yok"}
+                trend={data.trends?.spent}
+                trendKind="spend"
               />
               <KpiCard
                 icon={<FileText className="w-3.5 h-3.5" />}
                 label="Tamamlanan Rapor"
                 value={data.totals.reports_completed}
                 sub={`${data.totals.reports_total} toplam · %${data.kpis.completion_rate_pct} tamamlama`}
+                trend={data.trends?.reports_completed}
+                trendKind="count"
               />
               <KpiCard
                 icon={<MessageSquare className="w-3.5 h-3.5" />}
                 label="AI Mesajı"
                 value={data.totals.messages}
                 sub={`${data.totals.faq_conversations} FAQ sohbeti`}
+                trend={data.trends?.messages}
+                trendKind="count"
               />
               <KpiCard
                 icon={<Target className="w-3.5 h-3.5" />}
                 label="Rapor Başı Ort."
                 value={fmtTRY(data.kpis.avg_spend_per_report)}
                 sub="tamamlanan rapor başına"
+                trend={data.trends?.avg_spend_per_report}
+                trendKind="spend"
               />
             </div>
 
@@ -341,16 +349,62 @@ export default function Analytics() {
   );
 }
 
-function KpiCard({ icon, label, value, sub }) {
+function KpiCard({ icon, label, value, sub, trend, trendKind = "count" }) {
   return (
     <div className="bg-white border border-zinc-200 rounded-md p-5" data-testid={`kpi-${label}`}>
-      <div className="flex items-center gap-2 text-zinc-500 mb-3">
-        {icon}
-        <span className="text-[10px] font-mono uppercase tracking-[0.2em]">{label}</span>
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2 text-zinc-500">
+          {icon}
+          <span className="text-[10px] font-mono uppercase tracking-[0.2em]">{label}</span>
+        </div>
+        <TrendBadge trend={trend} kind={trendKind} />
       </div>
       <div className="font-black text-3xl tracking-tight text-zinc-950">{value}</div>
       <div className="text-xs text-zinc-500 mt-1.5">{sub}</div>
     </div>
+  );
+}
+
+/**
+ * TrendBadge — shows previous-period delta.
+ * For "spend" kind, an INCREASE is red (bad for costs), decrease is green.
+ * For "count" kind, an INCREASE is green (more activity), decrease is red.
+ */
+function TrendBadge({ trend, kind }) {
+  if (!trend) return null;
+  const d = trend.delta_pct;
+  if (d === null || d === undefined) {
+    return (
+      <span
+        title="Önceki dönemde veri yok"
+        className="inline-flex items-center gap-0.5 text-[10px] font-mono uppercase tracking-wider text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded"
+      >
+        <Minus className="w-2.5 h-2.5" /> yeni
+      </span>
+    );
+  }
+  const up = d > 0;
+  const flat = d === 0;
+  // for "spend" kind: up=red, down=green; for "count" kind: reversed
+  const goodWhenUp = kind === "count";
+  const isGood = flat ? true : (up === goodWhenUp);
+  const color = flat
+    ? "text-zinc-500 bg-zinc-100"
+    : isGood
+      ? "text-emerald-700 bg-emerald-50"
+      : "text-red-700 bg-red-50";
+  const Icon = flat ? Minus : up ? ArrowUp : ArrowDown;
+  const abs = Math.abs(d);
+  const display = abs >= 1000 ? `${Math.round(abs)}%` : `%${abs.toLocaleString("tr-TR", { maximumFractionDigits: 1 })}`;
+  return (
+    <span
+      title={`Önceki dönem: ${trend.previous}`}
+      className={`inline-flex items-center gap-0.5 text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded ${color}`}
+      data-testid="trend-badge"
+    >
+      <Icon className="w-2.5 h-2.5" />
+      {display}
+    </span>
   );
 }
 

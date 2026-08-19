@@ -51,13 +51,13 @@ def generate_pdf(report: Dict[str, Any], output_path: str) -> None:
                             topMargin=2*cm, bottomMargin=2*cm)
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle('title', parent=styles['Title'],
-                                 fontSize=20, textColor=colors.HexColor('#0a0a0a'),
+                                 fontSize=20, textColor=colors.HexColor('#0b2340'),
                                  spaceAfter=6)
     subtitle_style = ParagraphStyle('subtitle', parent=styles['Normal'],
-                                    fontSize=9, textColor=colors.HexColor('#666666'),
+                                    fontSize=9, textColor=colors.HexColor('#c9a24a'),
                                     spaceAfter=20)
     h2 = ParagraphStyle('h2', parent=styles['Heading2'],
-                        fontSize=13, textColor=colors.HexColor('#0a0a0a'),
+                        fontSize=13, textColor=colors.HexColor('#0b2340'),
                         spaceBefore=14, spaceAfter=8)
     body = ParagraphStyle('body', parent=styles['BodyText'],
                           fontSize=10, leading=15,
@@ -66,7 +66,8 @@ def generate_pdf(report: Dict[str, Any], output_path: str) -> None:
     story = []
     story.append(Paragraph(report.get("template_name", "Değerleme Raporu"), title_style))
     story.append(Paragraph(
-        f"Rapor Tarihi: {datetime.now().strftime('%d.%m.%Y')} &nbsp;&nbsp;|&nbsp;&nbsp; Rapor No: {report.get('report_no', '-')}",
+        f"KırCan Danışmanlık, Eğitim ve Değerleme Ltd. Şti. &nbsp;·&nbsp; "
+        f"Rapor Tarihi: {datetime.now().strftime('%d.%m.%Y')} &nbsp;|&nbsp; Rapor No: {report.get('report_no', '-')}",
         subtitle_style))
 
     # Field table

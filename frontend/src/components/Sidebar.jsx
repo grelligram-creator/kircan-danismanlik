@@ -15,18 +15,19 @@ export default function Sidebar({ chats, activeChatId, onNewChat, onSelect, onDe
     <aside className="w-72 border-r border-zinc-200 bg-zinc-50 flex flex-col flex-shrink-0" data-testid="sidebar">
       <div className="p-4 border-b border-zinc-200">
         <div className="flex items-center gap-2 mb-4">
-          <div className="w-8 h-8 rounded-md bg-zinc-950 flex items-center justify-center">
-            <Building2 className="w-4 h-4 text-white" />
+          <div className="w-9 h-9 rounded-md overflow-hidden bg-[var(--brand-navy)] ring-1 ring-[var(--brand-gold)]/40">
+            <img src="/kircan-logo.jpg" alt="KırCan" className="w-full h-full object-cover" />
           </div>
           <div>
-            <div className="text-xs font-mono uppercase tracking-[0.25em] text-zinc-950">Valura AI</div>
+            <div className="text-xs font-mono uppercase tracking-[0.25em] text-[var(--brand-navy)]">KırCan AI</div>
             <div className="text-[10px] text-zinc-500">Değerleme Asistanı</div>
           </div>
         </div>
         <Button
           data-testid="new-chat-btn"
           onClick={onNewChat}
-          className="w-full bg-zinc-950 text-white hover:bg-zinc-800 rounded-md"
+          className="w-full text-white rounded-md"
+          style={{ backgroundColor: "var(--brand-navy)" }}
         >
           <Plus className="w-4 h-4 mr-2" /> Yeni Sohbet
         </Button>
@@ -133,6 +134,12 @@ export default function Sidebar({ chats, activeChatId, onNewChat, onSelect, onDe
           >
             <LogOut className="w-3.5 h-3.5" />
           </button>
+        </div>
+
+        <div className="pt-2 mt-2 border-t border-zinc-200 text-center">
+          <div className="text-[9px] font-mono uppercase tracking-[0.25em] text-zinc-400">
+            Powered by <span className="text-[var(--brand-gold-2)] font-medium">Algorisma</span>
+          </div>
         </div>
       </div>
     </aside>

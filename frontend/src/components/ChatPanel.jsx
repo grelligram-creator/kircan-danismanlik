@@ -227,14 +227,14 @@ function MessageBubble({ message, streaming }) {
   return (
     <div className={`flex gap-4 ${isUser ? "flex-row-reverse" : ""}`}>
       <div className={`w-8 h-8 rounded-md flex-shrink-0 flex items-center justify-center text-xs font-mono ${
-        isUser ? "bg-zinc-950 text-white" : "bg-[#0055FF]/10 text-[#0055FF]"
+        isUser ? "bg-[var(--brand-navy)] text-white" : "bg-[var(--brand-navy)] text-[var(--brand-gold-2)] ring-1 ring-[var(--brand-gold)]/30"
       }`}>
         {isUser ? "SEN" : "AI"}
       </div>
       <div className={`max-w-[80%] ${isUser ? "text-right" : ""}`}>
         <div className={`inline-block text-left rounded-md px-4 py-3 ${
           isUser
-            ? "bg-zinc-950 text-white"
+            ? "bg-[var(--brand-navy)] text-white"
             : "bg-zinc-50 border border-zinc-200 text-zinc-900"
         }`}>
           <div className="whitespace-pre-wrap text-sm leading-relaxed font-body">

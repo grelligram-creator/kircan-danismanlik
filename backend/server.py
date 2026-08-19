@@ -616,7 +616,8 @@ async def create_chat(payload: Dict[str, Any], user: User = Depends(get_current_
         )
     else:
         greeting = (
-            "Merhaba! Gayrimenkul değerleme hakkında merak ettiğiniz teknik soruları sorabilirsiniz. "
+            "Merhaba! Ben **KırCan Danışmanlık** için hazırlanmış yapay zeka asistanınızım. "
+            "Gayrimenkul değerleme hakkında merak ettiğiniz teknik soruları sorabilirsiniz. "
             "Emsal karşılaştırma, kapitalizasyon oranı, SPK mevzuatı, amortisman hesabı gibi konularda yardımcı olabilirim."
         )
 
@@ -655,12 +656,19 @@ async def delete_chat(chat_id: str, user: User = Depends(get_current_user)):
 # ============================================================
 
 def _build_system_prompt(chat: Dict[str, Any], user_tpl: Optional[Dict[str, Any]] = None) -> str:
+    brand_intro = (
+        "Sen KırCan Danışmanlık, Eğitim ve Değerleme Ltd. Şti. bünyesinde çalışan bir yapay zeka "
+        "asistanısın. KırCan; SPK lisanslı, kurumsal gayrimenkul değerleme, eğitim ve danışmanlık "
+        "hizmetleri sunar. Cevaplarında KırCan'ın profesyonel, güvenilir ve saha tecrübesine sahip "
+        "duruşunu yansıt. Sana kim olduğun sorulursa 'KırCan Danışmanlık için hazırlanmış yapay "
+        "zeka değerleme asistanıyım' de. Kullanıcıya kurumsal ama sıcak bir dille hitap et."
+    )
     if chat["mode"] == "faq":
         faq_text = "\n\n".join([f"S: {q['q']}\nC: {q['a']}" for q in FAQ_ITEMS])
         return (
-            "Sen deneyimli, SPK lisanslı bir gayrimenkul değerleme uzmanısın. "
+            f"{brand_intro}\n\n"
             "Türkçe, net ve teknik olarak doğru cevaplar ver. "
-            "Aşağıdaki bilgi bankasından yararlanabilirsin ancak dışına da çıkabilirsin:\n\n"
+            "Aşağıdaki KırCan bilgi bankasından yararlanabilirsin ancak dışına da çıkabilirsin:\n\n"
             + faq_text
         )
 
@@ -671,7 +679,9 @@ def _build_system_prompt(chat: Dict[str, Any], user_tpl: Optional[Dict[str, Any]
             ensure_ascii=False, indent=2,
         )
         collected = json.dumps(chat.get("fields", {}), ensure_ascii=False, indent=2, default=str)
-        return f"""Sen deneyimli, SPK lisanslı bir gayrimenkul değerleme uzmanısın. Kullanıcının **{user_tpl['name']}** şablonunu doldurmasına yardım ediyorsun.
+        return f"""{brand_intro}
+
+Kullanıcının **{user_tpl['name']}** şablonunu doldurmasına yardım ediyorsun.
 
 ## Görevin
 1. Aşağıdaki alanları SIRAYLA, tek tek kullanıcıya sor ve topla.
@@ -695,13 +705,15 @@ def _build_system_prompt(chat: Dict[str, Any], user_tpl: Optional[Dict[str, Any]
 
     template = _template_by_id(chat.get("template_id", ""))
     if not template:
-        return "Sen bir gayrimenkul değerleme uzmanısın."
+        return f"{brand_intro}"
 
     fields_json = json.dumps(template["fields"], ensure_ascii=False, indent=2)
     sections_list = "\n".join(f"- {s}" for s in template["sections"])
     collected = json.dumps(chat.get("fields", {}), ensure_ascii=False, indent=2)
 
-    return f"""Sen deneyimli, SPK lisanslı bir gayrimenkul değerleme uzmanısın. Kullanıcının **{template['name']}** hazırlamasına yardım ediyorsun.
+    return f"""{brand_intro}
+
+Kullanıcının **{template['name']}** hazırlamasına yardım ediyorsun.
 
 ## Görevin
 1. Aşağıdaki alanları sırayla, tek tek, kullanıcıya sor ve topla.

@@ -29,6 +29,15 @@ h1, h2, h3, h4 {
 ::-webkit-scrollbar-thumb { background: #d4d4d8; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #a1a1aa; }
 
+/* KırCan brand palette */
+:root {
+  --brand-navy: #0b2340;
+  --brand-navy-2: #0e2a4d;
+  --brand-gold: #c9a24a;
+  --brand-gold-2: #d4af37;
+  --brand-gold-soft: #f0dfa4;
+}
+
 /* Word document preview (mammoth-generated HTML) */
 .doc-preview { color: #1a1a1a; font-family: "IBM Plex Sans", system-ui, sans-serif; line-height: 1.6; }
 .doc-preview h1.doc-title { font-family: "Manrope", sans-serif; font-size: 1.75rem; letter-spacing: -0.02em; font-weight: 300; margin-bottom: 1.25rem; }

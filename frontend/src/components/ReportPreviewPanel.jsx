@@ -360,10 +360,10 @@ function BuiltinPreview({ chat, fieldsList, sectionsList, template }) {
   return (
     <div className="p-10">
       <div className="border-b border-zinc-200 pb-6 mb-6">
-        <div className="text-[10px] font-mono uppercase tracking-[0.3em] text-zinc-500 mb-2">
-          Değerleme Raporu · {chat.report_no}
+        <div className="text-[10px] font-mono uppercase tracking-[0.3em] text-[var(--brand-gold-2)] mb-1">
+          KırCan Danışmanlık · Değerleme Raporu · {chat.report_no}
         </div>
-        <h1 className="text-3xl tracking-tight font-light text-zinc-950">{template}</h1>
+        <h1 className="text-3xl tracking-tight font-light text-[var(--brand-navy)]">{template}</h1>
         <div className="text-xs text-zinc-500 mt-2 font-mono">
           {new Date().toLocaleDateString("tr-TR")}
         </div>

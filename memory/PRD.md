@@ -78,6 +78,13 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - **Image auto-crop**: `PATCH /api/chats/{id}/image/{key}` extended to accept `aspect_ratio` (16:9 / 4:3 / 1:1 / 3:4 / original) — server crops via PIL center-crop; or explicit `crop {left,top,right,bottom}` pixel rect. Preview URL is cache-busted with a `?v=xxx` query param so the browser re-fetches.
 - **Frontend crop UI**: image resize popup now has a "Otomatik Kırpma" row with 5 preset aspect ratio chips; each triggers server-side crop and refreshes preview + eventually the DOCX render.
 
+## Implemented (v9 — Feb 2026)
+- **KırCan brand rollout**: logo (`/kircan-logo.jpg`) placed in `public/`; navy `#0b2340` + gold `#c9a24a` palette exposed as CSS variables and applied across login hero, sidebar header, chat bubbles, template preview headings, PDF `reportlab` styles, and the AI's Bearer badge.
+- **AI persona**: system prompt now opens with "Sen KırCan Danışmanlık, Eğitim ve Değerleme Ltd. Şti. bünyesinde çalışan bir yapay zeka asistanısın..." so identity/tone stays on-brand across FAQ, built-in templates, and custom Word templates.
+- **PDF / DOCX headers**: generated reports now stamp "KırCan Danışmanlık, Eğitim ve Değerleme Ltd. Şti." with the brand palette on every downloaded document.
+- **Developer credit**: "Powered by Algorisma" in gold at the bottom of the login page and inside the sidebar footer.
+- Page `<title>` updated to "KırCan AI · Değerleme Asistanı".
+
 ## Prioritized Backlog
 ### P0 (blocking full production)
 - Real Stripe/Iyzico payment integration for credit packages (currently MOCK)

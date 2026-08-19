@@ -45,6 +45,12 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - Sidebar link "Kullanım Analitiği" for quick navigation
 - Testing agent iteration_3: 10/10 backend + full UI verified
 
+## Implemented (v4 — Feb 2026)
+- **Range selector** (7 / 30 / 90 Gün + Özel): analytics endpoint now accepts `days` OR `date_from`+`date_to`; window returned in response, chart & KPIs auto-adjust
+- **Custom date range** via Shadcn Calendar (range mode, 2-month popover) in Analytics UI
+- **CSV export** (`GET /api/analytics/export.csv?days=|date_from=&date_to=`) with UTF-8 BOM for Excel — includes summary, template breakdown, daily spend, per-message ledger, and top-up history in Turkish
+- Frontend one-click download preserving current filter
+
 ## Prioritized Backlog
 ### P0 (blocking full production)
 - Real Stripe/Iyzico payment integration for credit packages (currently MOCK)

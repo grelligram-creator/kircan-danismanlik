@@ -618,30 +618,61 @@ async def email_report(chat_id: str, user: User = Depends(get_current_user)):
 # ============================================================
 
 @api.get("/analytics/summary")
-async def analytics_summary(user: User = Depends(get_current_user)):
-    """Return last-30-day usage analytics for the current user."""
-    now = datetime.now(timezone.utc)
-    since = now - timedelta(days=30)
-    since_iso = since.isoformat()
+async def analytics_summary(
+    user: User = Depends(get_current_user),
+    days: Optional[int] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+):
+    """Return usage analytics for the given window.
 
-    # All usage events for user in last 30 days
+    Query params:
+      - days: 7 / 30 / 90 (preset window; default 30)
+      - date_from / date_to: ISO date (YYYY-MM-DD); override `days` when both provided
+    """
+    now = datetime.now(timezone.utc)
+
+    if date_from and date_to:
+        try:
+            since = datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc)
+            end_day = datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc)
+            until = end_day + timedelta(days=1)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date_from / date_to")
+    else:
+        window_days = int(days) if days else 30
+        if window_days not in (7, 30, 90) and (window_days < 1 or window_days > 365):
+            raise HTTPException(status_code=400, detail="days must be 7, 30, 90 or 1..365")
+        today_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+        since = today_start - timedelta(days=window_days - 1)
+        until = today_start + timedelta(days=1)
+
+    since_iso = since.isoformat()
+    until_iso = until.isoformat()
+    total_days = max(1, (until.date() - since.date()).days)
+
+    since_iso = since.isoformat()
+    until_iso = until.isoformat()
+    total_days = max(1, (until.date() - since.date()).days)
+
+    # All usage events for user in the window
     events = await db.usage_events.find(
-        {"user_id": user.user_id, "created_at": {"$gte": since_iso}},
+        {"user_id": user.user_id, "created_at": {"$gte": since_iso, "$lt": until_iso}},
         {"_id": 0},
-    ).to_list(10000)
+    ).to_list(20000)
 
     total_spent = round(sum(float(e.get("cost", 0)) for e in events), 2)
     total_messages = len(events)
     report_spend = round(sum(float(e.get("cost", 0)) for e in events if e.get("mode") == "report"), 2)
 
-    # Chat & report stats (30d window based on chats.created_at ISO string)
-    chats_30d = await db.chats.find(
-        {"user_id": user.user_id, "created_at": {"$gte": since_iso}},
+    # Chat & report stats (window based on chats.created_at ISO string)
+    chats_win = await db.chats.find(
+        {"user_id": user.user_id, "created_at": {"$gte": since_iso, "$lt": until_iso}},
         {"_id": 0},
-    ).to_list(10000)
-    reports_completed = sum(1 for c in chats_30d if c.get("status") == "completed" and c.get("mode") == "report")
-    reports_total = sum(1 for c in chats_30d if c.get("mode") == "report")
-    faq_count = sum(1 for c in chats_30d if c.get("mode") == "faq")
+    ).to_list(20000)
+    reports_completed = sum(1 for c in chats_win if c.get("status") == "completed" and c.get("mode") == "report")
+    reports_total = sum(1 for c in chats_win if c.get("mode") == "report")
+    faq_count = sum(1 for c in chats_win if c.get("mode") == "faq")
     completion_rate = round((reports_completed / reports_total) * 100, 1) if reports_total else 0.0
     avg_spend_per_report = round(report_spend / reports_completed, 2) if reports_completed else 0.0
 
@@ -653,7 +684,7 @@ async def analytics_summary(user: User = Depends(get_current_user)):
         b = template_map.setdefault(tid, {"template_id": tid, "name": tname, "messages": 0, "spent": 0.0})
         b["messages"] += 1
         b["spent"] += float(e.get("cost", 0))
-    for c in chats_30d:
+    for c in chats_win:
         tid = c.get("template_id") or ("faq" if c.get("mode") == "faq" else None)
         if not tid:
             continue
@@ -682,7 +713,6 @@ async def analytics_summary(user: User = Depends(get_current_user)):
 
     preferred = None
     if template_breakdown:
-        # Prefer the one with the most completed reports; tie-break by spend
         preferred_pick = max(
             template_breakdown,
             key=lambda x: (x["reports_completed"], x["messages"], x["spent"]),
@@ -695,7 +725,7 @@ async def analytics_summary(user: User = Depends(get_current_user)):
             "spent": preferred_pick["spent"],
         }
 
-    # Daily spend for last 30 days (fill zeros)
+    # Daily spend (fill zeros)
     daily: Dict[str, float] = {}
     for e in events:
         try:
@@ -704,19 +734,21 @@ async def analytics_summary(user: User = Depends(get_current_user)):
             continue
         daily[d] = round(daily.get(d, 0.0) + float(e.get("cost", 0)), 2)
     daily_series = []
-    for i in range(29, -1, -1):
-        d = (now - timedelta(days=i)).date().isoformat()
+    for i in range(total_days):
+        d = (since + timedelta(days=i)).date().isoformat()
         daily_series.append({"date": d, "amount": round(daily.get(d, 0.0), 2)})
 
     # Top-ups (Stripe wallet purchases) in the window
     topups = await db.payment_transactions.find(
-        {"user_id": user.user_id, "credited": True, "credited_at": {"$gte": since_iso}},
+        {"user_id": user.user_id, "credited": True, "credited_at": {"$gte": since_iso, "$lt": until_iso}},
         {"_id": 0},
     ).to_list(1000)
     total_topped_up = float(round(sum(float(t.get("credit_try", 0)) for t in topups), 2))
 
     return {
-        "window_days": 30,
+        "window_days": total_days,
+        "date_from": since.date().isoformat(),
+        "date_to": (until - timedelta(days=1)).date().isoformat(),
         "wallet_balance": user.wallet_balance,
         "totals": {
             "spent": total_spent,
@@ -734,6 +766,95 @@ async def analytics_summary(user: User = Depends(get_current_user)):
         "template_breakdown": template_breakdown,
         "daily_spend": daily_series,
     }
+
+
+@api.get("/analytics/export.csv")
+async def analytics_export(
+    user: User = Depends(get_current_user),
+    days: Optional[int] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+):
+    """Export raw usage events for the window as CSV."""
+    summary = await analytics_summary(user=user, days=days, date_from=date_from, date_to=date_to)
+    since_iso = f"{summary['date_from']}T00:00:00+00:00"
+    until_iso = f"{summary['date_to']}T23:59:59+00:00"
+
+    events = await db.usage_events.find(
+        {"user_id": user.user_id, "created_at": {"$gte": since_iso, "$lt": until_iso}},
+        {"_id": 0},
+    ).sort("created_at", 1).to_list(50000)
+    topups = await db.payment_transactions.find(
+        {"user_id": user.user_id, "credited": True, "credited_at": {"$gte": since_iso, "$lt": until_iso}},
+        {"_id": 0},
+    ).sort("credited_at", 1).to_list(5000)
+
+    import csv, io
+    buf = io.StringIO()
+    buf.write("\ufeff")  # BOM so Excel opens UTF-8 correctly
+    w = csv.writer(buf, delimiter=",", quoting=csv.QUOTE_MINIMAL)
+
+    w.writerow(["# Kullanım Analitiği CSV Raporu"])
+    w.writerow(["# Kullanıcı", user.email])
+    w.writerow(["# Dönem", summary["date_from"], summary["date_to"]])
+    w.writerow(["# Oluşturma", datetime.now(timezone.utc).isoformat()])
+    w.writerow([])
+
+    w.writerow(["=== ÖZET ==="])
+    w.writerow(["Metrik", "Değer"])
+    w.writerow(["Toplam Harcama (TL)", summary["totals"]["spent"]])
+    w.writerow(["Toplam Mesaj", summary["totals"]["messages"]])
+    w.writerow(["Rapor (Toplam)", summary["totals"]["reports_total"]])
+    w.writerow(["Rapor (Tamamlanan)", summary["totals"]["reports_completed"]])
+    w.writerow(["FAQ Sohbeti", summary["totals"]["faq_conversations"]])
+    w.writerow(["Yüklenen Bakiye (TL)", summary["totals"]["topped_up"]])
+    w.writerow(["Tamamlama Oranı (%)", summary["kpis"]["completion_rate_pct"]])
+    w.writerow(["Rapor Başı Ort. (TL)", summary["kpis"]["avg_spend_per_report"]])
+    w.writerow([])
+
+    w.writerow(["=== ŞABLON BAZINDA ==="])
+    w.writerow(["Şablon", "Mesaj", "Rapor (Tamamlanan/Toplam)", "Harcama (TL)"])
+    for t in summary["template_breakdown"]:
+        w.writerow([t["name"], t["messages"], f"{t['reports_completed']}/{t['reports_total']}", t["spent"]])
+    w.writerow([])
+
+    w.writerow(["=== GÜNLÜK HARCAMA ==="])
+    w.writerow(["Tarih", "Harcama (TL)"])
+    for d in summary["daily_spend"]:
+        w.writerow([d["date"], d["amount"]])
+    w.writerow([])
+
+    w.writerow(["=== MESAJ DETAYLARI ==="])
+    w.writerow(["Tarih/Saat", "Mod", "Şablon", "Sohbet ID", "Ücret (TL)"])
+    for e in events:
+        w.writerow([
+            e.get("created_at", ""),
+            e.get("mode", ""),
+            e.get("template_name") or ("FAQ" if e.get("mode") == "faq" else "-"),
+            e.get("chat_id", ""),
+            e.get("cost", 0),
+        ])
+    w.writerow([])
+
+    if topups:
+        w.writerow(["=== BAKİYE YÜKLEMELERİ ==="])
+        w.writerow(["Tarih", "Paket", "Ödenen (TL)", "Bonus (TL)", "Toplam Kredi (TL)"])
+        for t in topups:
+            w.writerow([
+                t.get("credited_at", ""),
+                t.get("package_id", ""),
+                t.get("amount_try", 0),
+                t.get("bonus_try", 0),
+                t.get("credit_try", 0),
+            ])
+
+    csv_data = buf.getvalue().encode("utf-8")
+    filename = f"kullanim_{summary['date_from']}_{summary['date_to']}.csv"
+    return Response(
+        content=csv_data,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ============================================================

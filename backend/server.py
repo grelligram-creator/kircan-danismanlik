@@ -25,6 +25,8 @@ from emergentintegrations.payments.stripe.checkout import (
 from templates_data import REPORT_TEMPLATES, FAQ_ITEMS
 from document_utils import parse_uploaded_file, generate_pdf, generate_docx
 from wallet_packages import WALLET_PACKAGES, get_package
+from auth_deps import SUPER_ADMIN_EMAILS, is_super_admin, is_admin_or_super
+from knowledge_base import get_kb_context
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -58,6 +60,9 @@ class User(BaseModel):
     name: str
     picture: str = ""
     wallet_balance: float = 50.0
+    role: str = "user"  # 'super_admin' | 'admin' | 'user'
+    company_id: Optional[str] = None
+    blocked: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -125,6 +130,25 @@ async def get_current_user(
             {"$set": {"wallet_balance": user_doc["wallet_balance"]}, "$unset": {"credits": ""}},
         )
     user_doc.pop("credits", None)
+
+    # Backfill role/company/blocked & auto-promote super admin by email
+    role_updates: Dict[str, Any] = {}
+    if "role" not in user_doc:
+        user_doc["role"] = "user"
+        role_updates["role"] = "user"
+    if user_doc["email"].lower() in SUPER_ADMIN_EMAILS and user_doc["role"] != "super_admin":
+        user_doc["role"] = "super_admin"
+        role_updates["role"] = "super_admin"
+    if "company_id" not in user_doc:
+        user_doc["company_id"] = None
+    if "blocked" not in user_doc:
+        user_doc["blocked"] = False
+        role_updates["blocked"] = False
+    if role_updates:
+        await db.users.update_one({"user_id": user_doc["user_id"]}, {"$set": role_updates})
+
+    if user_doc.get("blocked"):
+        raise HTTPException(status_code=403, detail="Hesabınız engellenmiştir. Yönetici ile iletişime geçin.")
     return User(**user_doc)
 
 
@@ -150,23 +174,41 @@ async def create_session(payload: Dict[str, str], response: Response):
 
     email = data["email"]
     existing = await db.users.find_one({"email": email}, {"_id": 0})
+    initial_role = "super_admin" if email.lower() in SUPER_ADMIN_EMAILS else "user"
     if existing:
         user_id = existing["user_id"]
-        await db.users.update_one(
-            {"user_id": user_id},
-            {"$set": {"name": data.get("name", existing.get("name", "")),
-                      "picture": data.get("picture", existing.get("picture", ""))}},
-        )
+        update_fields: Dict[str, Any] = {
+            "name": data.get("name", existing.get("name", "")),
+            "picture": data.get("picture", existing.get("picture", "")),
+        }
+        # Auto-promote super admin
+        if email.lower() in SUPER_ADMIN_EMAILS and existing.get("role") != "super_admin":
+            update_fields["role"] = "super_admin"
+        await db.users.update_one({"user_id": user_id}, {"$set": update_fields})
     else:
         user_id = f"user_{uuid.uuid4().hex[:12]}"
+        # Check for pending invite associated with this email
+        invite = await db.company_invites.find_one({"email": email.lower(), "used": False})
+        company_id = invite.get("company_id") if invite else None
+        assigned_role = invite.get("role", "user") if invite else initial_role
+        if email.lower() in SUPER_ADMIN_EMAILS:
+            assigned_role = "super_admin"
         await db.users.insert_one({
             "user_id": user_id,
             "email": email,
             "name": data.get("name", ""),
             "picture": data.get("picture", ""),
             "wallet_balance": 50.0,
+            "role": assigned_role,
+            "company_id": company_id,
+            "blocked": False,
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
+        if invite:
+            await db.company_invites.update_one(
+                {"invite_id": invite["invite_id"]},
+                {"$set": {"used": True, "used_by": user_id, "used_at": datetime.now(timezone.utc).isoformat()}},
+            )
 
     session_token = data["session_token"]
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
@@ -188,7 +230,13 @@ async def create_session(payload: Dict[str, str], response: Response):
 
 @api.get("/auth/me")
 async def auth_me(user: User = Depends(get_current_user)):
-    return user.model_dump()
+    payload = user.model_dump()
+    if user.company_id:
+        co = await db.companies.find_one({"company_id": user.company_id}, {"_id": 0, "name": 1})
+        payload["company_name"] = co.get("name") if co else None
+    else:
+        payload["company_name"] = None
+    return payload
 
 
 @api.post("/auth/logout")
@@ -197,6 +245,110 @@ async def logout(response: Response, session_token: Optional[str] = Cookie(defau
         await db.user_sessions.delete_one({"session_token": session_token})
     response.delete_cookie("session_token", path="/")
     return {"success": True}
+
+
+@api.patch("/auth/me")
+async def update_profile(payload: Dict[str, Any], user: User = Depends(get_current_user)):
+    """Users can update their own profile name (Google Auth manages email/picture)."""
+    updates: Dict[str, Any] = {}
+    if "name" in payload:
+        name = str(payload["name"]).strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="İsim boş olamaz")
+        updates["name"] = name[:120]
+    if not updates:
+        return {"success": True}
+    await db.users.update_one({"user_id": user.user_id}, {"$set": updates})
+    updated = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    return {"success": True, "user": updated}
+
+
+@api.get("/invites/{code}")
+async def check_invite(code: str):
+    """Public: validate an invite code before signing up (used in join page)."""
+    inv = await db.company_invites.find_one({"code": code, "used": False}, {"_id": 0})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Davet geçersiz veya kullanılmış")
+    company_name = None
+    if inv.get("company_id"):
+        co = await db.companies.find_one({"company_id": inv["company_id"]}, {"_id": 0, "name": 1})
+        company_name = co.get("name") if co else None
+    return {
+        "code": code,
+        "role": inv.get("role", "user"),
+        "company_id": inv.get("company_id"),
+        "company_name": company_name,
+        "email": inv.get("email"),
+    }
+
+
+@api.post("/auth/session/invite")
+async def create_session_with_invite(payload: Dict[str, str], response: Response):
+    """Same as /auth/session but also attaches the user to the invite's company."""
+    session_id = payload.get("session_id")
+    invite_code = payload.get("invite_code")
+    if not session_id or not invite_code:
+        raise HTTPException(status_code=400, detail="session_id ve invite_code gerekli")
+    inv = await db.company_invites.find_one({"code": invite_code, "used": False}, {"_id": 0})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Davet geçersiz")
+
+    async with httpx.AsyncClient(timeout=15) as hx:
+        r = await hx.get(
+            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+            headers={"X-Session-ID": session_id},
+        )
+    if r.status_code != 200:
+        raise HTTPException(status_code=401, detail="Session validation failed")
+    data = r.json()
+    email = data["email"]
+
+    existing = await db.users.find_one({"email": email}, {"_id": 0})
+    if existing:
+        user_id = existing["user_id"]
+        updates: Dict[str, Any] = {
+            "name": data.get("name", existing.get("name", "")),
+            "picture": data.get("picture", existing.get("picture", "")),
+            "company_id": inv.get("company_id"),
+        }
+        if inv.get("role") in ("admin", "user") and existing.get("role") != "super_admin":
+            updates["role"] = inv["role"]
+        await db.users.update_one({"user_id": user_id}, {"$set": updates})
+    else:
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        role = "super_admin" if email.lower() in SUPER_ADMIN_EMAILS else inv.get("role", "user")
+        await db.users.insert_one({
+            "user_id": user_id,
+            "email": email,
+            "name": data.get("name", ""),
+            "picture": data.get("picture", ""),
+            "wallet_balance": 50.0,
+            "role": role,
+            "company_id": inv.get("company_id"),
+            "blocked": False,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    await db.company_invites.update_one(
+        {"invite_id": inv["invite_id"]},
+        {"$set": {"used": True, "used_by": user_id, "used_at": datetime.now(timezone.utc).isoformat()}},
+    )
+
+    session_token = data["session_token"]
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    await db.user_sessions.insert_one({
+        "user_id": user_id,
+        "session_token": session_token,
+        "expires_at": expires_at,
+        "created_at": datetime.now(timezone.utc),
+    })
+    response.set_cookie(
+        key="session_token", value=session_token,
+        httponly=True, secure=True, samesite="none", path="/",
+        max_age=7 * 24 * 60 * 60,
+    )
+    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    return {"user": user_doc}
 
 
 # ============================================================
@@ -828,6 +980,17 @@ async def send_message(
     user_msg.pop("_id", None)
 
     system_prompt = _build_system_prompt(chat, user_tpl=(await _get_user_template(chat["user_template_id"])) if chat.get("user_template_id") else None)
+    # Inject KB context (global + company-scoped documents uploaded by admins)
+    kb_context = await get_kb_context(db, user)
+    if kb_context:
+        system_prompt = (
+            system_prompt
+            + "\n\n## KırCan Bilgi Bankası (Referans Dokümanlar)\n"
+            + "Aşağıdaki dokümanlar KırCan admin/süper admin ekibi tarafından yüklenmiştir. "
+            + "Kullanıcının sorularına yanıt verirken bu içerikleri kaynak olarak kullan. "
+            + "Bilgi çelişirse en güncel ve KırCan kaynağını tercih et.\n\n"
+            + kb_context
+        )
     llm = LlmChat(
         api_key=EMERGENT_LLM_KEY,
         session_id=chat_id,
@@ -1656,6 +1819,14 @@ async def stripe_webhook(request: Request):
 # ============================================================
 # Mount & CORS
 # ============================================================
+
+# Wire admin + knowledge-base routers (registered post-User definition to avoid circular imports)
+from admin_routes import register_admin_routes
+from knowledge_base import register_kb_routes
+admin_r = register_admin_routes(db, get_current_user, User)
+kb_r = register_kb_routes(db, get_current_user, User)
+app.include_router(admin_r)
+app.include_router(kb_r)
 
 app.include_router(api)
 

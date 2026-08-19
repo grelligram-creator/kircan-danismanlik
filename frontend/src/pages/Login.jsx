@@ -84,7 +84,7 @@ export default function Login() {
 
         <div className="mt-10 flex items-center gap-4 text-xs font-mono uppercase tracking-[0.2em] text-zinc-400">
           <div className="w-8 h-px bg-zinc-300" />
-          Emergent Google Auth
+          Güvenli Google Girişi
         </div>
 
         <div className="absolute bottom-6 left-0 right-0 flex justify-center">

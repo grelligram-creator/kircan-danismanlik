@@ -1,7 +1,7 @@
-# Valura AI — Gayrimenkul Değerleme AI Chat
+# KırCan Report AI — Gayrimenkul Değerleme AI Chat
 
 ## Original Problem Statement
-Turkish real estate valuation AI chat: users choose report templates, AI collects required info sequentially, parses uploaded PDF/DOCX/XLSX documents into the template, provides live preview, credit-based usage with low-balance upsell, and delivers reports (PDF+DOCX + email).
+Turkish real estate valuation AI chat: users choose report templates, AI collects required info sequentially, parses uploaded PDF/DOCX/XLSX documents into the template, provides live preview, credit-based usage with low-balance upsell, and delivers reports (PDF+DOCX + email). Product must be branded as "KırCan Report AI" (no Emergent references) with role-based multi-tenancy (super_admin / admin / user), company-scoped budgets, invite links, and an admin-managed knowledge base whose contents feed into every AI reply.
 
 ## Architecture
 - **Backend**: FastAPI + MongoDB (motor). Emergentintegrations LlmChat with Claude Sonnet 5 (`claude-sonnet-5`). Emergent Google Auth. Report generators via reportlab (PDF) and python-docx (DOCX). File parsing via pypdf, python-docx, openpyxl.
@@ -83,27 +83,35 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - **AI persona**: system prompt now opens with "Sen KırCan Danışmanlık, Eğitim ve Değerleme Ltd. Şti. bünyesinde çalışan bir yapay zeka asistanısın..." so identity/tone stays on-brand across FAQ, built-in templates, and custom Word templates.
 - **PDF / DOCX headers**: generated reports now stamp "KırCan Danışmanlık, Eğitim ve Değerleme Ltd. Şti." with the brand palette on every downloaded document.
 - **Developer credit**: "Powered by Algorisma" in gold at the bottom of the login page and inside the sidebar footer.
-- Page `<title>` updated to "KırCan AI · Değerleme Asistanı".
+- Page `<title>` updated to "KırCan Report AI".
+
+## Implemented (v4 — Feb 2026 · Rebrand + RBAC + Knowledge Base)
+- **Full rebrand to "KırCan Report AI"** — HTML `<title>`, meta description, favicon, PWA colors updated. Emergent script tag & PostHog analytics removed from `index.html`. Login page copy: "Emergent Google Auth" → "Güvenli Google Girişi". Sidebar wordmark: "KırCan AI" → "KırCan Report AI".
+- **Role-based access (super_admin / admin / user)** — `User` model extended with `role`, `company_id`, `blocked`. `SUPER_ADMIN_EMAILS = {"grelligram@gmail.com"}` whitelist in `backend/auth_deps.py` auto-promotes on login. `get_current_user` backfills legacy documents, refuses blocked users with 403, and invalidates their sessions on block.
+- **Super Admin Panel `/admin/super`** — `SuperAdmin.jsx`: Users tab (list, wallet topup, role change with auto-company creation, block/unblock, delete, chat viewer), Companies tab (create + budget top-up), Invites tab (create link + email lock + revoke), Summary tab (aggregate metrics).
+- **Admin Panel `/admin`** — `AdminPanel.jsx`: company-scoped user list, wallet transfer from company budget with balance guard, invite creation limited to `role: user` inside own company.
+- **Invite flow `/join/:code`** — `JoinInvite.jsx`: public validation via `GET /api/invites/{code}`, invite code stashed in `sessionStorage` before Google redirect, `POST /api/auth/session/invite` finalizes signup and attaches `company_id` + role atomically.
+- **Knowledge Base `/knowledge-base`** — `KnowledgeBase.jsx`: PDF/DOCX/TXT/XLSX/CSV upload with `scope=global|company`. `knowledge_base.get_kb_context()` injects up to ~25k chars of context per request into the Claude system prompt for both FAQ and report chats.
+- **Profile `/profile`** — Users can update their own name. Email/picture/role are read-only (Google Auth managed).
+- **Backend routers** — `admin_routes.py` (all `/api/admin/*`), `knowledge_base.py` (all `/api/kb/*`), registered via `register_admin_routes(db, get_current_user, User)` factories to keep server.py imports acyclic.
+- **New Mongo collections** — `companies`, `company_invites`, `company_ledger`, `wallet_ledger`, `kb_docs`.
 
 ## Prioritized Backlog
 ### P0 (blocking full production)
-- Real Stripe/Iyzico payment integration for credit packages (currently MOCK)
 - Real Resend/SendGrid email dispatch (currently MOCK)
-- Streaming LLM responses (SSE) for real-time typing effect (currently uses send_message)
 
 ### P1
-- Editable fields inside the preview panel (manual overrides)
-- Company/user report branding (logo upload) on generated PDFs
-- Report version history + PDF signing
-- Support for additional templates (tarım arazisi, deniz kenarı, otel/turistik)
+- Report cover page with KırCan logo on exported DOCX/PDF
+- Excel/PDF data extraction to auto-suggest template field values
+- Deployment (Publish button) — code is deploy-ready
 
 ### P2
-- Team workspaces + role-based sharing
+- Editable fields inside the preview panel (manual overrides)
+- Vector search over KB (currently full-text concatenation with a size cap)
 - Cost comparison across models (Sonnet vs Haiku for cheaper FAQ)
-- Analytics dashboard (raporlar/ay, kredi kullanımı)
-- Vector-based knowledge base expansion beyond FAQ
+- Refactor `server.py` (~1800 LoC) into modular routers; split `SuperAdmin.jsx` dialogs into separate files
 
 ## Notes
-- MOCKED integrations: email dispatch, credit purchase.
+- MOCKED integrations: email dispatch.
 - LLM model: `claude-sonnet-5` via Emergent Universal Key (EMERGENT_LLM_KEY).
-- Test user seeded: `test.valuer@example.com`, session_token=`test_session_seed_001`.
+- Seeded test users: see `/app/memory/test_credentials.md`.

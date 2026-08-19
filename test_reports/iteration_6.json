@@ -1,0 +1,36 @@
+{
+  "summary": "Focused re-test of the 2 CRITICAL frontend bugs from iteration_5 plus targeted regressions. Backend: /app/backend/tests/test_admin_kb_rbac.py re-run — 45/45 passing (no regression). GET /api/admin/users now returns role/company_id/blocked/wallet_balance for ALL users including legacy docs (test-user-shared-002 => role 'user', company_id null, blocked false), no Mongo _id leaked. Frontend: /admin (AdminPanel) now renders without white-screen/TypeError — admin-panel + admin-users-table with 4 rows, role badges USER/USER/USER/SUPER_ADMIN (default 'USER' for legacy doc), no CRA error overlay, zero console/page errors; topup dialog opens. /profile direct load now prefills profile-name-input ('Görkem Elligram') and profile-save-btn is enabled; renamed to TEST_Renamed Admin, PATCH /api/auth/me persisted across reload, then restored. Regressions verified: /admin/super users list + topup dialog + submit persisted (₺100,00 -> ₺107,00 after reload, then reverted), KB upload -> list -> delete flow works end-to-end. Both previously CRITICAL bugs are FIXED.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/admin/users", "issue": "Still loads usage_events per user in a Python loop (N+1); use an aggregation $group. Performance only, not a functional failure."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "KnowledgeBase", "issue": "Unfixed LOW items from iteration_5 persist: React hydration warning '<span> cannot be a child of <option>' from kb-scope-select, and delete still uses native window.confirm instead of shadcn AlertDialog.", "selector": "[data-testid=\"kb-scope-select\"]", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Knowledge Base upload card", "issues": ["Scope selector is a native <select>, visually inconsistent with the shadcn design system used elsewhere"]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_admin_kb_rbac.py", "/app/test_reports/pytest/iteration6_admin_kb.xml"],
+  "action_items": [
+    "Optional (LOW): replace window.confirm in KnowledgeBase delete with AlertDialog and fix the <span>-inside-<option> hydration warning in kb-scope-select.",
+    "Optional: update /app/memory/test_credentials.md — super admin name in DB is 'Görkem Elligram', doc says 'Grelli Gram (Super Admin)'.",
+    "Optional perf: replace per-user usage_events loop in admin_routes.list_users with a $group aggregation."
+  ],
+  "critical_code_review_comments": [
+    "Role guards are now safe: AdminPanel uses (u.role || 'user'), Profile uses (user.role || 'user'), and backend list_users setdefaults role/company_id/blocked/wallet_balance — good defense in depth.",
+    "SuperAdmin.jsx is still ~750 lines with 6 inline dialogs; split into separate files."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (45/45)", "frontend": "100% of re-tested flows (/admin render, /profile prefill+save persist, /admin/super topup persist, KB upload/list/delete)"},
+  "seed_data_creation": "Temp: renamed super admin then restored to 'Görkem Elligram'; topped up test-user-shared-002 by 7 TL then reset wallet_balance to 100 and removed the TEST_it6 ledger entry; uploaded then deleted TEST_IT6_Dok KB doc (kb_docs count back to 0, no orphan files in backend/knowledge_base_files).",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "cookie session_token=test_super_admin_token (grelligram@gmail.com, super_admin); session_token=test_session_seed_001 (test.valuer@example.com, user)",
+  "context_for_next_testing_agent": "Both iteration_5 CRITICAL bugs confirmed fixed. Correct super-admin testids: topup-user-{uid}, topup-dialog, topup-amount-input, topup-note-input, topup-submit-btn, role-user-{uid}, block-user-{uid}, delete-user-{uid}. AdminPanel (/admin) uses admin-user-{uid} / admin-topup-{uid}. KB uses kb-file-input / kb-title-input / kb-upload-btn / kb-doc-{id} / kb-delete-{id} and needs a page.on('dialog') accept handler. Note test-user-seed-001 still carries company_id co_ac3097437b from an earlier role change. Only LOW-priority KB polish items remain untested/unfixed.",
+  "rca_of_the_issue": "Fixes verified: (1) backend list_users setdefault + frontend (u.role || 'user').toUpperCase() removes the render-time TypeError that white-screened /admin; (2) Profile.jsx useEffect([user]) syncing name resolves the empty input / disabled save on direct load, since useState initialised before AuthContext resolved."
+}

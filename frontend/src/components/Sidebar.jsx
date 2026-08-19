@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { Plus, MessageSquare, HelpCircle, LogOut, Wallet, Building2, Trash2, BarChart3, FileStack } from "lucide-react";
+import { Plus, MessageSquare, HelpCircle, LogOut, Wallet, Building2, Trash2, BarChart3, FileStack, Shield, DatabaseZap, UserCog } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { useNavigate } from "react-router-dom";
 import { formatDistanceToNow } from "date-fns";
@@ -9,6 +9,8 @@ export default function Sidebar({ chats, activeChatId, onNewChat, onSelect, onDe
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const lowBalance = (user?.wallet_balance ?? 0) < 30;
+  const isAdmin = user?.role === "admin" || user?.role === "super_admin";
+  const isSuper = user?.role === "super_admin";
   const fmtTRY = (n) => `₺${Number(n ?? 0).toLocaleString("tr-TR", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 
   return (
@@ -19,8 +21,8 @@ export default function Sidebar({ chats, activeChatId, onNewChat, onSelect, onDe
             <img src="/kircan-logo.jpg" alt="KırCan" className="w-full h-full object-cover" />
           </div>
           <div>
-            <div className="text-xs font-mono uppercase tracking-[0.25em] text-[var(--brand-navy)]">KırCan AI</div>
-            <div className="text-[10px] text-zinc-500">Değerleme Asistanı</div>
+            <div className="text-xs font-mono uppercase tracking-[0.25em] text-[var(--brand-navy)]">KırCan Report AI</div>
+            <div className="text-[10px] text-zinc-500">{user?.company_name || "Değerleme Asistanı"}</div>
           </div>
         </div>
         <Button
@@ -91,6 +93,27 @@ export default function Sidebar({ chats, activeChatId, onNewChat, onSelect, onDe
           </button>
         </div>
 
+        {isAdmin && (
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              data-testid="kb-nav-btn"
+              onClick={() => navigate("/knowledge-base")}
+              className="flex items-center gap-1.5 justify-center px-2 py-2 rounded-md border border-[var(--brand-gold)]/40 bg-[var(--brand-gold)]/10 hover:bg-[var(--brand-gold)]/20 transition-colors text-xs text-[var(--brand-navy)]"
+            >
+              <DatabaseZap className="w-3.5 h-3.5" />
+              <span>Bilgi Bankası</span>
+            </button>
+            <button
+              data-testid="admin-nav-btn"
+              onClick={() => navigate(isSuper ? "/admin/super" : "/admin")}
+              className="flex items-center gap-1.5 justify-center px-2 py-2 rounded-md border border-[var(--brand-navy)]/40 bg-[var(--brand-navy)]/5 hover:bg-[var(--brand-navy)]/10 transition-colors text-xs text-[var(--brand-navy)]"
+            >
+              <Shield className="w-3.5 h-3.5" />
+              <span>{isSuper ? "Süper Panel" : "Admin"}</span>
+            </button>
+          </div>
+        )}
+
         <button
           data-testid="credits-btn"
           onClick={onOpenUpsell}
@@ -113,7 +136,12 @@ export default function Sidebar({ chats, activeChatId, onNewChat, onSelect, onDe
         </button>
 
         <div className="flex items-center justify-between px-1">
-          <div className="flex items-center gap-2 min-w-0">
+          <button
+            onClick={() => navigate("/profile")}
+            data-testid="profile-btn"
+            className="flex items-center gap-2 min-w-0 flex-1 text-left hover:opacity-80 transition-opacity"
+            title="Profil ayarları"
+          >
             {user?.picture ? (
               <img src={user.picture} alt="" className="w-7 h-7 rounded-full" />
             ) : (
@@ -125,7 +153,7 @@ export default function Sidebar({ chats, activeChatId, onNewChat, onSelect, onDe
               <div className="text-xs font-medium text-zinc-900 truncate">{user?.name}</div>
               <div className="text-[10px] text-zinc-500 truncate">{user?.email}</div>
             </div>
-          </div>
+          </button>
           <button
             data-testid="logout-btn"
             onClick={logout}

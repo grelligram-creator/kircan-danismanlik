@@ -23,7 +23,16 @@ export default function AuthCallback() {
 
     (async () => {
       try {
-        const { data } = await api.post("/auth/session", { session_id: sessionId });
+        const inviteCode = sessionStorage.getItem("kircan_invite_code");
+        let data;
+        if (inviteCode) {
+          const res = await api.post("/auth/session/invite", { session_id: sessionId, invite_code: inviteCode });
+          data = res.data;
+          sessionStorage.removeItem("kircan_invite_code");
+        } else {
+          const res = await api.post("/auth/session", { session_id: sessionId });
+          data = res.data;
+        }
         setUser(data.user);
         window.history.replaceState({}, document.title, "/dashboard");
         navigate("/dashboard", { replace: true, state: { user: data.user } });

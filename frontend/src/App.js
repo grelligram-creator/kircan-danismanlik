@@ -7,6 +7,11 @@ import AuthCallback from "@/pages/AuthCallback";
 import Analytics from "@/pages/Analytics";
 import TemplateManager from "@/pages/TemplateManager";
 import { PaymentSuccess, PaymentCancel } from "@/pages/Payment";
+import SuperAdmin from "@/pages/SuperAdmin";
+import AdminPanel from "@/pages/AdminPanel";
+import KnowledgeBase from "@/pages/KnowledgeBase";
+import JoinInvite from "@/pages/JoinInvite";
+import Profile from "@/pages/Profile";
 import { Toaster } from "@/components/ui/sonner";
 
 function AppRouter() {
@@ -23,6 +28,11 @@ function AppRouter() {
       <Route path="/templates" element={<TemplateManager />} />
       <Route path="/payment/success" element={<PaymentSuccess />} />
       <Route path="/payment/cancel" element={<PaymentCancel />} />
+      <Route path="/admin/super" element={<SuperAdmin />} />
+      <Route path="/admin" element={<AdminPanel />} />
+      <Route path="/knowledge-base" element={<KnowledgeBase />} />
+      <Route path="/join/:code" element={<JoinInvite />} />
+      <Route path="/profile" element={<Profile />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

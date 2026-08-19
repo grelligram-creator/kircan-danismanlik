@@ -1,0 +1,44 @@
+{
+  "summary": "Tested KırCan Report AI rebrand + RBAC + Super Admin panel + Knowledge Base + invites + profile. Backend: new pytest suite /app/backend/tests/test_admin_kb_rbac.py — 45/45 passing (auth/role backfill, admin users list/detail, wallet topup + ledger persistence, role change w/ auto-company, block/unblock + session invalidation, delete user, companies + budget topup, invites create/list/public-lookup/revoke, KB upload/list/delete + scope & RBAC negatives, profile PATCH, regression: /wallet/costs, /templates, FAQ chat SSE with Claude). Frontend: super admin panel (4 tabs, users table, topup dialog, role dialog, user detail + chat viewer, company create/budget topup, invite create + /join/:code page), KB upload/delete UI, RBAC redirects for regular user, rebrand smoke (title 'KırCan Report AI', no 'Emergent' in HTML). Found 2 frontend defects: /admin (AdminPanel) white-screens with a runtime TypeError, and /profile name input is empty on direct load so Kaydet stays disabled.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/admin/users", "issue": "Legacy user documents are returned without normalized 'role'/'company_id' fields (e.g. test-user-shared-002 has role=<MISSING>). Backfill only happens when that user themselves calls get_current_user. This missing field is what crashes AdminPanel.jsx. Default role/company_id in the admin list response (or backfill on read)."},
+      {"endpoint": "POST /api/kb/upload", "issue": "Orphan files remain in /app/backend/knowledge_base_files when the Mongo record is removed out-of-band (kb_dd779ef74a81_kb_test.txt present with 0 kb_docs). Non-blocking housekeeping."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "AdminPanel (/admin)", "issue": "CRITICAL white-screen: 'TypeError: Cannot read properties of undefined (reading toUpperCase)' at AdminPanel.jsx:123 -> {u.role.toUpperCase()} when any listed user document lacks 'role'. Reproduced as super_admin on /admin (page renders the CRA error overlay, admin-panel content unusable, 0 rows).", "selector": "[data-testid=\"admin-users-table\"]", "priority": "CRITICAL"},
+      {"component": "Profile (/profile)", "issue": "Name input is empty on direct load/refresh: useState(user?.name) is initialized before AuthContext resolves the user and never re-syncs (no useEffect on [user]); save button stays disabled (disabled={!name.trim()}) so the user cannot update their name unless they navigate client-side from an already-loaded page. Also Profile.jsx:78 user.role.toUpperCase() will throw for a user doc without role.", "selector": "[data-testid=\"profile-name-input\"]", "priority": "HIGH"},
+      {"component": "KnowledgeBase", "issue": "Delete uses native window.confirm() instead of a shadcn AlertDialog (inconsistent with the rest of the UI and blocks automated flows). Also React hydration warning: <span> rendered as child of <option> in kb-scope-select. File size shows '0 KB' for small files (rounding).", "selector": "[data-testid=\"kb-delete-*\"]", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Super admin panel initial load", "issue": "First /api/auth/me call returns 401 then succeeds (console 'Failed to load resource: 401'), and loadAll() fires twice (each /admin/* endpoint requested 2x). Functionally OK but noisy/duplicate work; consider guarding the effect.", "affected_selectors": ["[data-testid=\"users-table\"]"]},
+      {"flow": "Role revert admin->user", "issue": "Setting a user back to 'user' keeps the auto-created company_id, so the user still shows a company on /profile and sidebar. Confirm this is intended.", "affected_selectors": ["[data-testid=\"role-select\"]"]}
+    ],
+    "design_issues": [
+      {"screen": "Super Admin panel / KB / Profile", "issues": ["Layout, contrast and spacing look correct; no contrast problems found", "Scope selector is a native <select> (not shadcn Select) — visually inconsistent with the rest of the design system"]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_admin_kb_rbac.py", "/app/test_reports/pytest/iteration5_admin_kb.xml"],
+  "action_items": [
+    "Fix AdminPanel.jsx:123 crash — guard with (u.role || 'user').toUpperCase() AND normalize role/company_id in GET /api/admin/users response.",
+    "Fix Profile.jsx — add useEffect(() => setName(user?.name || ''), [user]) so the name field prefills on direct load, and guard user.role.toUpperCase().",
+    "Optional: replace window.confirm in KnowledgeBase delete with AlertDialog; fix <span> inside <option> hydration warning in kb-scope-select."
+  ],
+  "critical_code_review_comments": [
+    "Any `x.role.toUpperCase()` on server-provided user docs is unsafe — legacy documents predate the role field; normalize on the backend read path (admin list/detail) rather than relying on the per-user login backfill.",
+    "SuperAdmin.jsx is ~750 lines with 6 inline dialog components — split dialogs into separate files.",
+    "list_users loads up to 20000 usage_events per user in a Python loop (N+1); use an aggregation $group on usage_events instead — will not scale.",
+    "Frontend state initialized from async context (Profile name) must be synced via useEffect; same pattern risk exists anywhere useState(user?.x) is used."
+  ],
+  "updated_files": ["/app/backend/tests/test_admin_kb_rbac.py"],
+  "success_rate": {"backend": "100% (45/45)", "frontend": "85% (super admin CRUD, KB, RBAC redirects, rebrand pass; /admin crash + /profile prefill fail)"},
+  "seed_data_creation": "Created and then removed: TEST_ companies, invite for test_invitee_ui@example.com, TEST_UI_KB_Dok KB doc, temp block/delete users, wallet ledger notes. Seed users restored (test-user-seed-001: 150 TL/role user/company null/name 'Test Valuer'; grelligram: 500 TL/super_admin). One orphan file remains at /app/backend/knowledge_base_files/kb_dd779ef74a81_kb_test.txt from an earlier iteration.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "cookie/Bearer session_token=test_super_admin_token (grelligram@gmail.com, super_admin); session_token=test_session_seed_001 (test.valuer@example.com, user) — from /app/memory/test_credentials.md",
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/test_admin_kb_rbac.py` (45 tests, self-cleaning; uses pymongo for temp users so it never invalidates the shared seed sessions). Frontend: set the session_token cookie for realestate-ai-flow.preview.emergentagent.com. Playwright auto-dismisses window.confirm — attach a dialog handler that accepts before clicking kb-delete-*. Always wait for a data row selector (e.g. tr[data-testid^=\"user-row-\"]) instead of just the table, otherwise counts read 0 while data loads. Retest /admin (AdminPanel) and /profile after fixes.",
+  "rca_of_the_issue": "AdminPanel crash: GET /api/admin/users returns raw Mongo docs; users created before the RBAC change (test-user-shared-002) have no 'role' key because backfill only runs inside get_current_user for that specific user. AdminPanel.jsx line 123 calls u.role.toUpperCase() unguarded -> TypeError during render -> whole /admin route white-screens for admins/super admins. Profile bug: useState(user?.name || '') evaluates on first render while AuthContext user is still null (auth/me pending), and there is no effect to re-sync, so the input stays '' and the save button's disabled={!name.trim()} guard blocks the update entirely on a direct visit/refresh."
+}

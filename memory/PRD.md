@@ -38,6 +38,13 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - **Atomic wallet deduction** with `find_one_and_update` prevents concurrency races & revenue leak on client disconnect
 - Testing agent iteration_2: 11/11 backend pytest + full UI verified
 
+## Implemented (v3 — Feb 2026)
+- **Usage Analytics dashboard** (`/analytics`): 4 KPI cards (30d harcama, tamamlanan raporlar, AI mesajları, rapor başı ort.), 30-day area chart of daily TL spending, preferred-template highlight card, template breakdown table (messages/reports/spent per template)
+- New `usage_events` ledger persists every charged message for accurate analytics
+- Backend endpoint `GET /api/analytics/summary` with totals, KPIs, preferred_template, template_breakdown, daily_spend
+- Sidebar link "Kullanım Analitiği" for quick navigation
+- Testing agent iteration_3: 10/10 backend + full UI verified
+
 ## Prioritized Backlog
 ### P0 (blocking full production)
 - Real Stripe/Iyzico payment integration for credit packages (currently MOCK)

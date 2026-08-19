@@ -396,6 +396,17 @@ async def send_message(
         )
     new_balance = round(float(reserved.get("wallet_balance", 0.0)), 2)
 
+    # Ledger: log this usage for analytics (deducted regardless of stream outcome — reserved above)
+    await db.usage_events.insert_one({
+        "user_id": user.user_id,
+        "chat_id": chat_id,
+        "mode": chat["mode"],
+        "template_id": chat.get("template_id"),
+        "template_name": chat.get("template_name"),
+        "cost": float(cost),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+
     user_text = (payload.get("content") or "").strip()
     attachment_ids: List[str] = payload.get("attachment_ids", [])
 
@@ -600,6 +611,129 @@ async def email_report(chat_id: str, user: User = Depends(get_current_user)):
         "mock": True,
     })
     return {"success": True, "sent_to": user.email, "mock": True}
+
+
+# ============================================================
+# Analytics
+# ============================================================
+
+@api.get("/analytics/summary")
+async def analytics_summary(user: User = Depends(get_current_user)):
+    """Return last-30-day usage analytics for the current user."""
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=30)
+    since_iso = since.isoformat()
+
+    # All usage events for user in last 30 days
+    events = await db.usage_events.find(
+        {"user_id": user.user_id, "created_at": {"$gte": since_iso}},
+        {"_id": 0},
+    ).to_list(10000)
+
+    total_spent = round(sum(float(e.get("cost", 0)) for e in events), 2)
+    total_messages = len(events)
+    report_spend = round(sum(float(e.get("cost", 0)) for e in events if e.get("mode") == "report"), 2)
+
+    # Chat & report stats (30d window based on chats.created_at ISO string)
+    chats_30d = await db.chats.find(
+        {"user_id": user.user_id, "created_at": {"$gte": since_iso}},
+        {"_id": 0},
+    ).to_list(10000)
+    reports_completed = sum(1 for c in chats_30d if c.get("status") == "completed" and c.get("mode") == "report")
+    reports_total = sum(1 for c in chats_30d if c.get("mode") == "report")
+    faq_count = sum(1 for c in chats_30d if c.get("mode") == "faq")
+    completion_rate = round((reports_completed / reports_total) * 100, 1) if reports_total else 0.0
+    avg_spend_per_report = round(report_spend / reports_completed, 2) if reports_completed else 0.0
+
+    # Template breakdown
+    template_map: Dict[str, Dict[str, Any]] = {}
+    for e in events:
+        tid = e.get("template_id") or "faq"
+        tname = e.get("template_name") or ("FAQ Sohbeti" if tid == "faq" else "-")
+        b = template_map.setdefault(tid, {"template_id": tid, "name": tname, "messages": 0, "spent": 0.0})
+        b["messages"] += 1
+        b["spent"] += float(e.get("cost", 0))
+    for c in chats_30d:
+        tid = c.get("template_id") or ("faq" if c.get("mode") == "faq" else None)
+        if not tid:
+            continue
+        b = template_map.setdefault(tid, {"template_id": tid, "name": c.get("template_name") or "FAQ Sohbeti",
+                                          "messages": 0, "spent": 0.0})
+        b.setdefault("reports_total", 0)
+        b.setdefault("reports_completed", 0)
+        if c.get("mode") == "report":
+            b["reports_total"] = b.get("reports_total", 0) + 1
+            if c.get("status") == "completed":
+                b["reports_completed"] = b.get("reports_completed", 0) + 1
+    template_breakdown = sorted(
+        [
+            {
+                "template_id": v["template_id"],
+                "name": v["name"],
+                "messages": v.get("messages", 0),
+                "spent": round(v.get("spent", 0.0), 2),
+                "reports_total": v.get("reports_total", 0),
+                "reports_completed": v.get("reports_completed", 0),
+            }
+            for v in template_map.values()
+        ],
+        key=lambda x: x["spent"], reverse=True,
+    )
+
+    preferred = None
+    if template_breakdown:
+        # Prefer the one with the most completed reports; tie-break by spend
+        preferred_pick = max(
+            template_breakdown,
+            key=lambda x: (x["reports_completed"], x["messages"], x["spent"]),
+        )
+        preferred = {
+            "template_id": preferred_pick["template_id"],
+            "name": preferred_pick["name"],
+            "reports_completed": preferred_pick["reports_completed"],
+            "messages": preferred_pick["messages"],
+            "spent": preferred_pick["spent"],
+        }
+
+    # Daily spend for last 30 days (fill zeros)
+    daily: Dict[str, float] = {}
+    for e in events:
+        try:
+            d = datetime.fromisoformat(e["created_at"]).date().isoformat()
+        except Exception:
+            continue
+        daily[d] = round(daily.get(d, 0.0) + float(e.get("cost", 0)), 2)
+    daily_series = []
+    for i in range(29, -1, -1):
+        d = (now - timedelta(days=i)).date().isoformat()
+        daily_series.append({"date": d, "amount": round(daily.get(d, 0.0), 2)})
+
+    # Top-ups (Stripe wallet purchases) in the window
+    topups = await db.payment_transactions.find(
+        {"user_id": user.user_id, "credited": True, "credited_at": {"$gte": since_iso}},
+        {"_id": 0},
+    ).to_list(1000)
+    total_topped_up = float(round(sum(float(t.get("credit_try", 0)) for t in topups), 2))
+
+    return {
+        "window_days": 30,
+        "wallet_balance": user.wallet_balance,
+        "totals": {
+            "spent": total_spent,
+            "messages": total_messages,
+            "reports_total": reports_total,
+            "reports_completed": reports_completed,
+            "faq_conversations": faq_count,
+            "topped_up": total_topped_up,
+        },
+        "kpis": {
+            "avg_spend_per_report": avg_spend_per_report,
+            "completion_rate_pct": completion_rate,
+        },
+        "preferred_template": preferred,
+        "template_breakdown": template_breakdown,
+        "daily_spend": daily_series,
+    }
 
 
 # ============================================================

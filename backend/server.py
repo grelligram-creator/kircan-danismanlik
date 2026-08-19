@@ -205,12 +205,14 @@ async def logout(response: Response, session_token: Optional[str] = Cookie(defau
 
 @api.get("/templates")
 async def list_templates(user: User = Depends(get_current_user)):
-    """Return built-in templates + user's own custom templates."""
-    custom_cursor = db.user_templates.find({"user_id": user.user_id}, {"_id": 0}).sort("created_at", -1)
+    """Return built-in templates + user's own custom templates + shared-with-user templates."""
+    q = {"$or": [{"user_id": user.user_id}, {"shared_with": {"$in": [user.email, user.email.lower()]}}]}
+    custom_cursor = db.user_templates.find(q, {"_id": 0}).sort("created_at", -1)
     custom = await custom_cursor.to_list(200)
     for c in custom:
         c.pop("original_docx_path", None)
         c.pop("prepared_docx_path", None)
+        c["is_shared_with_me"] = c.get("user_id") != user.user_id
     return {"templates": REPORT_TEMPLATES, "custom_templates": custom}
 
 
@@ -301,19 +303,42 @@ async def upload_user_template(
 
 @api.get("/user_templates")
 async def list_user_templates(user: User = Depends(get_current_user)):
-    cursor = db.user_templates.find({"user_id": user.user_id}, {"_id": 0, "original_docx_path": 0, "prepared_docx_path": 0}).sort("created_at", -1)
+    q = {"$or": [{"user_id": user.user_id}, {"shared_with": {"$in": [user.email, user.email.lower()]}}]}
+    cursor = db.user_templates.find(q, {"_id": 0, "original_docx_path": 0, "prepared_docx_path": 0}).sort("created_at", -1)
     items = await cursor.to_list(500)
+    for c in items:
+        c["is_shared_with_me"] = c.get("user_id") != user.user_id
     return {"templates": items}
 
 
 @api.get("/user_templates/{tid}")
 async def get_user_template(tid: str, user: User = Depends(get_current_user)):
     t = await _get_user_template(tid)
-    if not t or t.get("user_id") != user.user_id:
+    if not t or not _template_visible_to(t, user):
         raise HTTPException(status_code=404, detail="Template not found")
     t.pop("original_docx_path", None)
     t.pop("prepared_docx_path", None)
+    t["is_shared_with_me"] = t.get("user_id") != user.user_id
     return t
+
+
+@api.post("/user_templates/{tid}/share")
+async def share_user_template(tid: str, payload: Dict[str, Any], user: User = Depends(get_current_user)):
+    """Owner-only: add/remove team member emails."""
+    t = await _get_user_template(tid)
+    if not t:
+        raise HTTPException(status_code=404, detail="Template not found")
+    if t.get("user_id") != user.user_id:
+        raise HTTPException(status_code=403, detail="Sadece sahibi paylaşımı düzenleyebilir")
+    add_emails = [str(e).strip().lower() for e in (payload.get("add") or []) if e]
+    remove_emails = [str(e).strip().lower() for e in (payload.get("remove") or []) if e]
+    current = [e.lower() for e in (t.get("shared_with") or [])]
+    for e in add_emails:
+        if e and e not in current and e != user.email.lower():
+            current.append(e)
+    current = [e for e in current if e not in remove_emails]
+    await db.user_templates.update_one({"template_id": tid}, {"$set": {"shared_with": current}})
+    return {"shared_with": current}
 
 
 @api.patch("/user_templates/{tid}")
@@ -335,15 +360,33 @@ async def update_user_template(tid: str, payload: Dict[str, Any], user: User = D
             key = re.sub(r"[^a-z0-9_]", "_", key.lower())
             if not key:
                 continue
-            clean_fields.append({
+            ftype = f.get("type") if f.get("type") in ("text", "number", "date", "textarea", "image", "table") else "text"
+            entry: Dict[str, Any] = {
                 "key": key,
                 "label": str(f.get("label", key)).strip() or key,
-                "type": f.get("type") if f.get("type") in ("text", "number", "date", "textarea", "image") else "text",
+                "type": ftype,
                 "node_id": f.get("node_id"),
                 "replace_text": f.get("replace_text"),
                 "append_after_label": f.get("append_after_label"),
                 "hint": f.get("hint", ""),
-            })
+            }
+            if ftype == "table":
+                cols: List[Dict[str, Any]] = []
+                col_keys_seen = set()
+                for c in (f.get("columns") or []):
+                    ck = re.sub(r"[^a-z0-9_]", "_", str(c.get("key", "")).lower()).strip("_")
+                    if not ck or ck in col_keys_seen:
+                        continue
+                    col_keys_seen.add(ck)
+                    cols.append({
+                        "key": ck,
+                        "label": str(c.get("label", ck)).strip() or ck,
+                        "type": c.get("type") if c.get("type") in ("text", "number", "date") else "text",
+                    })
+                entry["columns"] = cols
+                entry["header_row_index"] = int(f.get("header_row_index", 0) or 0)
+                entry["template_row_index"] = int(f.get("template_row_index", 1) or 1)
+            clean_fields.append(entry)
         updates["fields"] = clean_fields
         # Re-apply placeholders on the original to rebuild prepared.docx
         summary = apply_placeholders(t["original_docx_path"], t["prepared_docx_path"], clean_fields)
@@ -372,23 +415,38 @@ async def delete_user_template(tid: str, user: User = Depends(get_current_user))
     return {"success": True}
 
 
+def _template_visible_to(tpl: Dict[str, Any], user: User) -> bool:
+    """Owner OR user's email is listed in shared_with (case-insensitive)."""
+    if tpl.get("user_id") == user.user_id:
+        return True
+    shared = [e.lower() for e in (tpl.get("shared_with") or [])]
+    return user.email.lower() in shared
+
+
 @api.get("/user_templates/{tid}/preview")
 async def user_template_preview(tid: str, chat_id: Optional[str] = None, user: User = Depends(get_current_user)):
     """Return HTML preview. If chat_id given, substitute the chat's current field values."""
     t = await _get_user_template(tid)
-    if not t or t.get("user_id") != user.user_id:
+    if not t or not _template_visible_to(t, user):
         raise HTTPException(status_code=404, detail="Template not found")
     values: Dict[str, Any] = {}
-    image_urls: Dict[str, str] = {}
+    image_urls: Dict[str, Any] = {}
+    table_data: Dict[str, List[Dict[str, Any]]] = {}
     if chat_id:
         chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
         if chat:
             values = dict(chat.get("fields", {}))
             for k, v in list(values.items()):
                 if isinstance(v, dict) and v.get("__image__"):
-                    image_urls[k] = v.get("preview_url", "")
+                    image_urls[k] = {
+                        "preview_url": v.get("preview_url", ""),
+                        "width_mm": v.get("width_mm", 80),
+                    }
                     values.pop(k, None)
-    html = preview_html(t["prepared_docx_path"], values, image_urls)
+                elif isinstance(v, list):
+                    table_data[k] = v
+                    values.pop(k, None)
+    html = preview_html(t["prepared_docx_path"], values, image_urls, table_data)
     return {"html": html, "fields": t.get("fields", [])}
 
 
@@ -400,11 +458,11 @@ def _template_by_id(tid: str) -> Optional[Dict[str, Any]]:
     return next((t for t in REPORT_TEMPLATES if t["id"] == tid), None)
 
 
-async def _resolve_template(template_id: Optional[str], user_template_id: Optional[str], user_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-    """Return (builtin_template, user_template). Only one is non-null. User templates must be owned by user_id."""
+async def _resolve_template(template_id: Optional[str], user_template_id: Optional[str], user: User) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Return (builtin_template, user_template). Only one is non-null. User templates must be owned by or shared with user."""
     if user_template_id:
         ut = await _get_user_template(user_template_id)
-        if ut and ut.get("user_id") != user_id:
+        if ut and not _template_visible_to(ut, user):
             return None, None
         return None, ut
     if template_id:
@@ -427,7 +485,10 @@ async def create_chat(payload: Dict[str, Any], user: User = Depends(get_current_
     mode = payload.get("mode", "report")
     template_id = payload.get("template_id")
     user_template_id = payload.get("user_template_id")
-    builtin, user_tpl = await _resolve_template(template_id, user_template_id, user.user_id)
+    builtin, user_tpl = await _resolve_template(template_id, user_template_id, user)
+    # ACL: if user requested a user_template_id but it's not visible to them, reject
+    if user_template_id and not user_tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
 
     chat_id = f"chat_{uuid.uuid4().hex[:10]}"
     if mode == "faq":
@@ -524,19 +585,21 @@ def _build_system_prompt(chat: Dict[str, Any], user_tpl: Optional[Dict[str, Any]
 
     if user_tpl:
         fields_json = json.dumps(
-            [{"key": f["key"], "label": f["label"], "type": f["type"], "hint": f.get("hint", "")} for f in user_tpl["fields"]],
+            [{"key": f["key"], "label": f["label"], "type": f["type"], "hint": f.get("hint", ""),
+              "columns": f.get("columns")} for f in user_tpl["fields"]],
             ensure_ascii=False, indent=2,
         )
-        collected = json.dumps(chat.get("fields", {}), ensure_ascii=False, indent=2)
+        collected = json.dumps(chat.get("fields", {}), ensure_ascii=False, indent=2, default=str)
         return f"""Sen deneyimli, SPK lisanslı bir gayrimenkul değerleme uzmanısın. Kullanıcının **{user_tpl['name']}** şablonunu doldurmasına yardım ediyorsun.
 
 ## Görevin
 1. Aşağıdaki alanları SIRAYLA, tek tek kullanıcıya sor ve topla.
-2. Kullanıcı PDF/Excel/Word yüklediğinde içeriğinden değerleri çıkar.
-3. Görsel (image) tipindeki alanlar için kullanıcıdan fotoğraf yüklemesini iste.
-4. Her cevabından SONRA JSON blok döndür: en sonda `<!--UPDATE-->` etiketi ile birlikte:
-   `<!--UPDATE {{"fields": {{...toplanan_alanlar...}} }}-->`
-5. Tüm alanlar dolduğunda "Rapor tamamlandı" yaz ve `<!--UPDATE {{...status:'completed'}}-->` işaretle.
+2. `image` tipindeki alanlar için kullanıcıdan üstteki "Görsel Slotları" barından fotoğraf yüklemesini iste (değer olarak "__pending__" kaydet).
+3. `table` tipindeki alanlar için: önce kaç satır gireceğini sor, sonra her satırın sütunlarını sırayla topla. Değeri liste formatında ver: `[{{ "col_key1": "...", "col_key2": "..." }}, ...]`.
+4. PDF/Excel/Word yüklendiğinde içeriğinden değerleri çıkar.
+5. Her cevabından SONRA JSON blok döndür: en sonda `<!--UPDATE-->` etiketi ile birlikte:
+   `<!--UPDATE {{"fields": {{"kisi": "Ali", "emsaller": [{{"adres":"X","alan":100}}] }} }}-->`
+6. Tüm alanlar dolduğunda "Rapor tamamlandı" yaz ve `<!--UPDATE {{...status:'completed'}}-->` işaretle.
 
 ## Toplanacak Alanlar (JSON şema)
 {fields_json}
@@ -546,8 +609,7 @@ def _build_system_prompt(chat: Dict[str, Any], user_tpl: Optional[Dict[str, Any]
 
 ## Kurallar
 - Kısa, net ve profesyonel bir dille yaz.
-- Her cevabın sonunda MUTLAKA `<!--UPDATE {{...}}-->` etiketi olsun (kullanıcı bunu görmez, sistem güncelleme için kullanır).
-- Görsel alanlar için değer olarak sadece "__pending__" koy (fotoğraf ayrıca yüklenecek).
+- Her cevabın sonunda MUTLAKA `<!--UPDATE {{...}}-->` etiketi olsun.
 - Kullanıcı ilgisiz bir şey sorarsa nazikçe rapor akışına geri getir."""
 
     template = _template_by_id(chat.get("template_id", ""))
@@ -747,8 +809,14 @@ async def send_message(
             if all_fields_done and all_sections_done:
                 new_status = "completed"
         elif user_tpl_now:
-            required_keys = [f["key"] for f in user_tpl_now.get("fields", []) if f.get("type") != "image"]
-            if required_keys and all(k in new_fields and new_fields[k] not in (None, "") for k in required_keys):
+            def _is_filled(f, v):
+                if f.get("type") == "image":
+                    return isinstance(v, dict) and v.get("__image__")
+                if f.get("type") == "table":
+                    return isinstance(v, list) and len(v) > 0
+                return v not in (None, "")
+            all_filled = all(_is_filled(f, new_fields.get(f["key"])) for f in user_tpl_now.get("fields", []))
+            if all_filled:
                 new_status = "completed"
 
         await db.chats.update_one(
@@ -822,7 +890,19 @@ async def chat_upload_image(
     path = UPLOAD_DIR / f"{upload_id}_{safe_name}"
     content = await file.read()
     path.write_bytes(content)
-    # Public URL for preview (served via /api/uploads/file/{upload_id})
+
+    # Validate the bytes are actually a decodable image (prevents render-time 500)
+    try:
+        from PIL import Image
+        with Image.open(str(path)) as im:
+            im.verify()
+    except Exception:
+        try:
+            path.unlink()
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail="Geçerli bir görsel dosyası değil")
+
     preview_url = f"/api/uploads/file/{upload_id}"
 
     await db.uploads.insert_one({
@@ -830,11 +910,61 @@ async def chat_upload_image(
         "path": str(path), "size": len(content), "kind": "image",
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
-    # Update chat.fields[field_key] with image payload
     new_fields = dict(chat.get("fields", {}))
-    new_fields[field_key] = {"__image__": True, "path": str(path), "preview_url": preview_url, "filename": safe_name}
+    prev = new_fields.get(field_key) or {}
+    width_mm = prev.get("width_mm", 80) if isinstance(prev, dict) else 80
+    new_fields[field_key] = {
+        "__image__": True, "path": str(path), "preview_url": preview_url,
+        "filename": safe_name, "width_mm": width_mm,
+    }
     await db.chats.update_one({"chat_id": chat_id}, {"$set": {"fields": new_fields}})
-    return {"success": True, "field_key": field_key, "preview_url": preview_url, "filename": safe_name}
+    return {"success": True, "field_key": field_key, "preview_url": preview_url, "filename": safe_name, "width_mm": width_mm}
+
+
+@api.patch("/chats/{chat_id}/image/{field_key}")
+async def chat_update_image(chat_id: str, field_key: str, payload: Dict[str, Any], user: User = Depends(get_current_user)):
+    """Update image metadata (width_mm) for a previously uploaded image field."""
+    chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    fields = dict(chat.get("fields", {}))
+    if not (isinstance(fields.get(field_key), dict) and fields[field_key].get("__image__")):
+        raise HTTPException(status_code=404, detail="Image field not found")
+    try:
+        w = float(payload.get("width_mm", 80))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="width_mm must be a number")
+    w = max(20.0, min(170.0, w))  # clamp to A4 page bounds
+    fields[field_key]["width_mm"] = w
+    await db.chats.update_one({"chat_id": chat_id}, {"$set": {"fields": fields}})
+    return {"success": True, "field_key": field_key, "width_mm": w}
+
+
+@api.patch("/chats/{chat_id}/table/{field_key}")
+async def chat_update_table(chat_id: str, field_key: str, payload: Dict[str, Any], user: User = Depends(get_current_user)):
+    """Replace the rows of a dynamic table field. Payload: {rows: [{col_key: value, ...}, ...]}."""
+    chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    ut = await _get_user_template(chat.get("user_template_id", "")) if chat.get("user_template_id") else None
+    if not ut:
+        raise HTTPException(status_code=400, detail="Tablo yalnızca özel şablonlarda destekleniyor")
+    tpl_field = next((f for f in ut.get("fields", []) if f["key"] == field_key and f.get("type") == "table"), None)
+    if not tpl_field:
+        raise HTTPException(status_code=404, detail="Table field not found")
+    col_keys = {c["key"] for c in tpl_field.get("columns", [])}
+    rows_in = payload.get("rows") or []
+    if not isinstance(rows_in, list):
+        raise HTTPException(status_code=400, detail="rows must be a list")
+    clean_rows: List[Dict[str, Any]] = []
+    for r in rows_in:
+        if not isinstance(r, dict):
+            continue
+        clean_rows.append({k: (v if v is not None else "") for k, v in r.items() if k in col_keys})
+    new_fields = dict(chat.get("fields", {}))
+    new_fields[field_key] = clean_rows
+    await db.chats.update_one({"chat_id": chat_id}, {"$set": {"fields": new_fields}})
+    return {"success": True, "field_key": field_key, "rows": clean_rows}
 
 
 @api.get("/uploads/file/{upload_id}")
@@ -875,17 +1005,17 @@ async def download_report(chat_id: str, fmt: str, user: User = Depends(get_curre
     # User template path: docxtpl-based rendering preserves original Word formatting
     if chat.get("user_template_id") and fmt == "docx":
         ut = await _get_user_template(chat["user_template_id"])
-        if not ut:
+        if not ut or not _template_visible_to(ut, user):
             raise HTTPException(status_code=404, detail="Template not found")
         values = dict(chat.get("fields", {}))
-        # Split out image fields (values like {"__image__": true, "path": "..."})
-        image_paths: Dict[str, str] = {}
+        # Split out image fields + table lists
+        image_paths: Dict[str, Any] = {}
         clean_values: Dict[str, Any] = {}
         for k, v in values.items():
             if isinstance(v, dict) and v.get("__image__") and v.get("path"):
-                image_paths[k] = v["path"]
+                image_paths[k] = {"path": v["path"], "width_mm": v.get("width_mm", 80)}
             else:
-                clean_values[k] = v
+                clean_values[k] = v  # lists (dynamic tables) pass through untouched — docxtpl loops them
         out_dir = REPORTS_DIR / chat_id
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"rapor_{chat['report_no'] or chat_id}.docx"

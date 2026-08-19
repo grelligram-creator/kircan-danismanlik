@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ArrowLeft, Upload, FileText, Trash2, Edit3, Loader2, Plus, X, Sparkles } from "lucide-react";
+import { ArrowLeft, Upload, FileText, Trash2, Edit3, Loader2, Plus, X, Sparkles, Share2, Users } from "lucide-react";
 import { toast } from "sonner";
 
 const FIELD_TYPES = [
@@ -22,7 +22,8 @@ export default function TemplateManager() {
   const { user, loading } = useAuth();
   const [items, setItems] = useState([]);
   const [uploading, setUploading] = useState(false);
-  const [editing, setEditing] = useState(null); // template being edited
+  const [editing, setEditing] = useState(null);
+  const [sharing, setSharing] = useState(null);
   const fileRef = useRef(null);
   const [meta, setMeta] = useState({ name: "", description: "" });
   const navigate = useNavigate();
@@ -186,19 +187,38 @@ export default function TemplateManager() {
                       <div className="w-8 h-8 rounded-md bg-zinc-100 text-zinc-700 flex items-center justify-center mb-3">
                         <FileText className="w-4 h-4" />
                       </div>
-                      <div className="font-medium text-zinc-950 mb-0.5">{t.name}</div>
+                      <div className="font-medium text-zinc-950 mb-0.5 flex items-center gap-2">
+                        {t.name}
+                        {t.is_shared_with_me && (
+                          <span className="text-[10px] font-mono uppercase tracking-widest text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
+                            <Users className="w-2.5 h-2.5" /> Paylaşılan
+                          </span>
+                        )}
+                        {(t.shared_with?.length || 0) > 0 && !t.is_shared_with_me && (
+                          <span className="text-[10px] font-mono uppercase tracking-widest text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
+                            <Users className="w-2.5 h-2.5" /> {t.shared_with.length}
+                          </span>
+                        )}
+                      </div>
                       {t.description && <div className="text-xs text-zinc-500 mb-2">{t.description}</div>}
                       <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-500">
                         {t.fields?.length || 0} alan · {t.filename}
                       </div>
                     </div>
                     <div className="flex flex-col gap-1">
-                      <Button variant="ghost" size="sm" onClick={() => setEditing(t)} data-testid={`edit-${t.template_id}`}>
-                        <Edit3 className="w-3.5 h-3.5" />
-                      </Button>
-                      <Button variant="ghost" size="sm" onClick={() => remove(t.template_id)} className="text-red-600 hover:text-red-700 hover:bg-red-50" data-testid={`del-${t.template_id}`}>
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </Button>
+                      {!t.is_shared_with_me && (
+                        <>
+                          <Button variant="ghost" size="sm" onClick={() => setSharing(t)} data-testid={`share-${t.template_id}`} title="Paylaş">
+                            <Share2 className="w-3.5 h-3.5" />
+                          </Button>
+                          <Button variant="ghost" size="sm" onClick={() => setEditing(t)} data-testid={`edit-${t.template_id}`}>
+                            <Edit3 className="w-3.5 h-3.5" />
+                          </Button>
+                          <Button variant="ghost" size="sm" onClick={() => remove(t.template_id)} className="text-red-600 hover:text-red-700 hover:bg-red-50" data-testid={`del-${t.template_id}`}>
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </Button>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -215,7 +235,78 @@ export default function TemplateManager() {
           onSaved={() => { setEditing(null); load(); }}
         />
       )}
+      {sharing && (
+        <ShareDialog template={sharing} onClose={() => setSharing(null)} onSaved={() => { setSharing(null); load(); }} />
+      )}
     </div>
+  );
+}
+
+function ShareDialog({ template, onClose, onSaved }) {
+  const [emails, setEmails] = useState(template.shared_with || []);
+  const [newEmail, setNewEmail] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const add = () => {
+    const e = newEmail.trim().toLowerCase();
+    if (!e || !/^\S+@\S+\.\S+$/.test(e)) {
+      toast.error("Geçerli bir e-posta girin");
+      return;
+    }
+    if (emails.map((x) => x.toLowerCase()).includes(e)) return;
+    setEmails([...emails, e]);
+    setNewEmail("");
+  };
+
+  const remove = (email) => setEmails(emails.filter((e) => e !== email));
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const currentSet = new Set((template.shared_with || []).map((e) => e.toLowerCase()));
+      const newSet = new Set(emails.map((e) => e.toLowerCase()));
+      const add_list = [...newSet].filter((e) => !currentSet.has(e));
+      const remove_list = [...currentSet].filter((e) => !newSet.has(e));
+      await api.post(`/user_templates/${template.template_id}/share`, { add: add_list, remove: remove_list });
+      toast.success("Paylaşım güncellendi");
+      onSaved();
+    } catch {
+      toast.error("Paylaşım kaydedilemedi");
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-lg bg-white" data-testid="share-dialog">
+        <DialogHeader>
+          <div className="flex items-center gap-2 text-zinc-500 mb-1">
+            <Users className="w-4 h-4" />
+            <span className="text-[10px] font-mono uppercase tracking-[0.25em]">Ekip Paylaşımı</span>
+          </div>
+          <DialogTitle className="text-2xl tracking-tight font-light">{template.name}</DialogTitle>
+          <DialogDescription>Şablona erişebilecek ekip üyelerinin e-posta adreslerini ekleyin. Onlar da kendi paketlerinde bu şablonu görecek ve kullanabilecek.</DialogDescription>
+        </DialogHeader>
+        <div className="flex gap-2">
+          <Input placeholder="ekip.uyesi@sirket.com" value={newEmail} onChange={(e) => setNewEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} data-testid="share-email-input" />
+          <Button onClick={add} variant="outline">Ekle</Button>
+        </div>
+        <div className="mt-2 min-h-[60px] flex flex-wrap gap-1.5">
+          {emails.length === 0 && <div className="text-xs text-zinc-500 italic">Kimseyle paylaşılmadı.</div>}
+          {emails.map((e) => (
+            <span key={e} className="inline-flex items-center gap-1.5 text-xs bg-zinc-100 rounded px-2 py-1">
+              {e}
+              <button onClick={() => remove(e)} className="text-zinc-500 hover:text-red-600"><X className="w-3 h-3" /></button>
+            </span>
+          ))}
+        </div>
+        <div className="flex justify-end gap-2 pt-4 border-t border-zinc-200">
+          <Button variant="outline" onClick={onClose}>Vazgeç</Button>
+          <Button onClick={save} disabled={saving} className="bg-zinc-950 text-white hover:bg-zinc-800" data-testid="save-share-btn">
+            {saving ? "Kaydediliyor..." : "Kaydet"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

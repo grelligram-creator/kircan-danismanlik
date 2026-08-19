@@ -1,5 +1,7 @@
 import { Button } from "@/components/ui/button";
-import { Download, Mail, FileText, CheckCircle2, Loader2, Upload, Image as ImageIcon } from "lucide-react";
+import { Download, Mail, FileText, CheckCircle2, Loader2, Upload, Table as TableIcon, Plus, X } from "lucide-react";
+import { Slider } from "@/components/ui/slider";
+import { Input } from "@/components/ui/input";
 import { api, API } from "@/lib/api";
 import { toast } from "sonner";
 import { useState, useEffect, useRef, useCallback } from "react";
@@ -68,6 +70,15 @@ export default function ReportPreviewPanel({ chat }) {
     }
   };
 
+  const resizeImage = async (fieldKey, width_mm) => {
+    try {
+      await api.patch(`/chats/${chat.chat_id}/image/${fieldKey}`, { width_mm });
+      await loadCustomPreview();
+    } catch {
+      toast.error("Yeniden boyutlandırma başarısız");
+    }
+  };
+
   if (!chat || chat.mode === "faq") {
     return (
       <div className="h-full flex items-center justify-center bg-zinc-100/50 p-8">
@@ -93,6 +104,9 @@ export default function ReportPreviewPanel({ chat }) {
   const sectionsList = Object.entries(chat.sections || {});
   const imageFields = isUserTpl
     ? (customPreview?.fields || []).filter((f) => f.type === "image")
+    : [];
+  const tableFields = isUserTpl
+    ? (customPreview?.fields || []).filter((f) => f.type === "table")
     : [];
   const hasContent = fieldsList.length > 0 || sectionsList.length > 0 || (isUserTpl && !!customPreview);
 
@@ -133,34 +147,37 @@ export default function ReportPreviewPanel({ chat }) {
       <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleImageFile} data-testid="image-upload-input" />
 
       {/* Image slot bar (for user templates only) */}
-      {isUserTpl && imageFields.length > 0 && (
+      {isUserTpl && (imageFields.length > 0 || tableFields.length > 0) && (
         <div className="border-b border-zinc-200 bg-white px-6 py-3 flex items-center gap-2 flex-wrap" data-testid="image-slot-bar">
-          <span className="text-[10px] font-mono uppercase tracking-widest text-zinc-500 mr-1">Görsel Slotları:</span>
-          {imageFields.map((f) => {
-            const filled = chat.fields?.[f.key]?.__image__;
-            return (
-              <button
-                key={f.key}
-                onClick={() => startImageUpload(f.key)}
-                disabled={uploadingImageKey === f.key}
-                data-testid={`img-slot-${f.key}`}
-                className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded border transition-colors ${
-                  filled
-                    ? "border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
-                    : "border-zinc-300 bg-white text-zinc-700 hover:border-zinc-950"
-                }`}
-              >
-                {uploadingImageKey === f.key ? (
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                ) : filled ? (
-                  <CheckCircle2 className="w-3 h-3" />
-                ) : (
-                  <Upload className="w-3 h-3" />
-                )}
-                {f.label}
-              </button>
-            );
-          })}
+          {imageFields.length > 0 && (
+            <>
+              <span className="text-[10px] font-mono uppercase tracking-widest text-zinc-500 mr-1">Görseller:</span>
+              {imageFields.map((f) => (
+                <ImageSlotChip
+                  key={f.key}
+                  field={f}
+                  value={chat.fields?.[f.key]}
+                  onUpload={() => startImageUpload(f.key)}
+                  onResize={(w) => resizeImage(f.key, w)}
+                  uploading={uploadingImageKey === f.key}
+                />
+              ))}
+            </>
+          )}
+          {tableFields.length > 0 && (
+            <>
+              <span className="text-[10px] font-mono uppercase tracking-widest text-zinc-500 ml-3 mr-1">Tablolar:</span>
+              {tableFields.map((f) => (
+                <TableFieldChip
+                  key={f.key}
+                  field={f}
+                  rows={chat.fields?.[f.key] || []}
+                  chatId={chat.chat_id}
+                  onSaved={loadCustomPreview}
+                />
+              ))}
+            </>
+          )}
         </div>
       )}
 
@@ -182,6 +199,121 @@ export default function ReportPreviewPanel({ chat }) {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function ImageSlotChip({ field, value, onUpload, onResize, uploading }) {
+  const filled = value?.__image__;
+  const [open, setOpen] = useState(false);
+  const [width, setWidth] = useState(value?.width_mm || 80);
+  useEffect(() => { if (value?.width_mm) setWidth(value.width_mm); }, [value?.width_mm]);
+  return (
+    <div className="relative inline-block">
+      <button
+        onClick={() => (filled ? setOpen((o) => !o) : onUpload())}
+        disabled={uploading}
+        data-testid={`img-slot-${field.key}`}
+        className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded border transition-colors ${
+          filled
+            ? "border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
+            : "border-zinc-300 bg-white text-zinc-700 hover:border-zinc-950"
+        }`}
+      >
+        {uploading ? <Loader2 className="w-3 h-3 animate-spin" /> : filled ? <CheckCircle2 className="w-3 h-3" /> : <Upload className="w-3 h-3" />}
+        {field.label}
+        {filled && <span className="text-[10px] font-mono text-emerald-700">·{Math.round(width)}mm</span>}
+      </button>
+      {open && filled && (
+        <div className="absolute z-20 top-full mt-1 left-0 bg-white border border-zinc-200 rounded-md shadow-lg p-3 w-64" data-testid={`img-resize-${field.key}`}>
+          <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-500 mb-2">Boyut · {Math.round(width)}mm</div>
+          <Slider min={30} max={170} step={5} value={[width]} onValueChange={(v) => setWidth(v[0])} onValueCommit={(v) => onResize(v[0])} />
+          <div className="flex justify-between text-[10px] font-mono text-zinc-400 mt-1">
+            <span>30mm</span><span>170mm</span>
+          </div>
+          <div className="flex gap-2 mt-3">
+            <Button size="sm" variant="outline" className="flex-1" onClick={onUpload}>Değiştir</Button>
+            <Button size="sm" variant="ghost" className="text-zinc-500" onClick={() => setOpen(false)}>Kapat</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TableFieldChip({ field, rows, chatId, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const [localRows, setLocalRows] = useState(rows);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { setLocalRows(rows); }, [rows]);
+
+  const cols = field.columns || [];
+  const addRow = () => setLocalRows((prev) => [...prev, Object.fromEntries(cols.map((c) => [c.key, ""]))]);
+  const removeRow = (i) => setLocalRows((prev) => prev.filter((_, idx) => idx !== i));
+  const updateCell = (i, k, v) => setLocalRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, [k]: v } : r)));
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api.patch(`/chats/${chatId}/table/${field.key}`, { rows: localRows });
+      toast.success(`${localRows.length} satır kaydedildi`);
+      await onSaved();
+      setOpen(false);
+    } catch {
+      toast.error("Kaydedilemedi");
+    } finally { setSaving(false); }
+  };
+
+  const filled = rows.length > 0;
+  return (
+    <div className="relative inline-block">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        data-testid={`table-slot-${field.key}`}
+        className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded border transition-colors ${
+          filled ? "border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100" : "border-zinc-300 bg-white text-zinc-700 hover:border-zinc-950"
+        }`}
+      >
+        <TableIcon className="w-3 h-3" />
+        {field.label} <span className="font-mono text-[10px] text-zinc-500">· {rows.length} satır</span>
+      </button>
+      {open && (
+        <div className="absolute z-20 top-full mt-1 left-0 bg-white border border-zinc-200 rounded-md shadow-lg p-3 w-[560px] max-w-[90vw]" data-testid={`table-editor-${field.key}`}>
+          <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-500 mb-2">{field.label} — {cols.length} sütun</div>
+          <div className="max-h-64 overflow-y-auto space-y-1.5">
+            {localRows.map((row, i) => (
+              <div key={i} className="flex items-center gap-1.5">
+                {cols.map((c) => (
+                  <Input
+                    key={c.key}
+                    placeholder={c.label}
+                    value={row[c.key] ?? ""}
+                    onChange={(e) => updateCell(i, c.key, e.target.value)}
+                    type={c.type === "number" ? "number" : "text"}
+                    className="text-xs h-8"
+                    data-testid={`table-cell-${field.key}-${i}-${c.key}`}
+                  />
+                ))}
+                <button onClick={() => removeRow(i)} data-testid={`table-row-del-${field.key}-${i}`} className="text-red-500 hover:text-red-700" title="Sil">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ))}
+            {localRows.length === 0 && (
+              <div className="text-xs text-zinc-500 italic py-3 text-center">Henüz satır yok</div>
+            )}
+          </div>
+          <div className="flex items-center justify-between mt-3 pt-2 border-t border-zinc-200">
+            <Button size="sm" variant="outline" onClick={addRow}><Plus className="w-3 h-3 mr-1" /> Satır Ekle</Button>
+            <div className="flex gap-2">
+              <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>Kapat</Button>
+              <Button size="sm" onClick={save} disabled={saving} className="bg-zinc-950 text-white hover:bg-zinc-800">
+                {saving ? "Kaydediliyor..." : "Kaydet"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -64,6 +64,14 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - **Security**: user_templates queries scoped to owner; `/api/uploads/file/{id}` requires auth + ownership.
 - Testing agent iteration_4: **10/10 backend + full UI verified**. Security scoping gaps fixed post-report.
 
+## Implemented (v7 — Feb 2026)
+- **Dynamic table rows**: `type: table` fields detected by AI (columns list). Backend injects docxtpl `{%tr for r in items %}` marker rows around the template row, so `docxtpl` renders one output row per user-supplied dict. Preview HTML expands the triple-row marker/template/endfor pattern into N filled `<tr>` elements.
+- **Chat-side table editor**: `PATCH /api/chats/{id}/table/{key}` accepts `{rows:[{col:val,...}]}` — the preview panel shows a "Tablolar" chip that opens an inline editor for adding/removing/editing rows.
+- **Image resizing**: `PATCH /api/chats/{id}/image/{key}` with `{width_mm}` (20-170mm clamp). Preview `<img>` sizes accordingly; final docxtpl `InlineImage(width=Mm(x))` matches.
+- **Template sharing**: `POST /api/user_templates/{id}/share {add:[emails], remove:[emails]}` — owner-only. Recipients (matching by email, case-insensitive) see the template in `/templates`, `/api/user_templates`, can preview + create chats + download; cannot PATCH/DELETE/re-share.
+- **Security hardening**: `create_chat` rejects unresolved `user_template_id` with 404; `download_report` re-checks visibility; image uploads validate bytes via PIL (rejects corrupt files at ingest instead of failing at render).
+- Testing agent iteration_5: 26/29 backend passed; the 2 HIGH bugs (ACL bypass + preview regex) and image validation gap have all been fixed and re-verified via curl.
+
 ## Prioritized Backlog
 ### P0 (blocking full production)
 - Real Stripe/Iyzico payment integration for credit packages (currently MOCK)

@@ -96,9 +96,16 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - **Backend routers** — `admin_routes.py` (all `/api/admin/*`), `knowledge_base.py` (all `/api/kb/*`), registered via `register_admin_routes(db, get_current_user, User)` factories to keep server.py imports acyclic.
 - **New Mongo collections** — `companies`, `company_invites`, `company_ledger`, `wallet_ledger`, `kb_docs`.
 
+## Implemented (v5 — Feb 2026 · Real Email via Resend)
+- **Resend integration** — `backend/email_utils.py`: async wrapper via `asyncio.to_thread`, branded HTML template (navy/gold, table layout, inline CSS), base64 attachment support.
+- **Report email now real** — `/api/chats/{chat_id}/email` renders the DOCX (user template or built-in), attaches it, sends via Resend. `email_logs` records `provider='resend'`, `provider_message_id`, and `status` (sent | failed) with sanitized error string for failures.
+- **Invite auto-email** — `POST /api/admin/invites` optionally emails the invite link when `email` is provided. Origin resolves in order: explicit `origin_url` → `Origin` header → `Referer` header. Sanitized error messages surface as `email_error` (validation / rate-limit / generic).
+- **Environment** — Added `RESEND_API_KEY` and `SENDER_EMAIL=onboarding@resend.dev` to `/app/backend/.env`. `resend==2.37.0` in `requirements.txt`.
+- **Note (test mode)**: Resend's default sender `onboarding@resend.dev` in test mode can only deliver to the account owner's verified email. For production, a custom domain must be verified in Resend Dashboard → Domains.
+
 ## Prioritized Backlog
 ### P0 (blocking full production)
-- Real Resend/SendGrid email dispatch (currently MOCK)
+- Verify a custom domain in Resend so emails can be sent to any recipient (currently only the owner's inbox works)
 
 ### P1
 - Report cover page with KırCan logo on exported DOCX/PDF

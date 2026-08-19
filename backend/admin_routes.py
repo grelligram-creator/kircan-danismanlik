@@ -263,7 +263,7 @@ def register_admin_routes(db, get_current_user, User):
     # INVITES
     # ================================
     @admin_router.post("/invites")
-    async def create_invite(payload: Dict[str, Any], user: User = Depends(get_current_user)):
+    async def create_invite(payload: Dict[str, Any], request: Request, user: User = Depends(get_current_user)):
         """Admin/super admin generates an invite code for a new user."""
         if not is_admin_or_super(user):
             raise HTTPException(status_code=403, detail="Yetkisiz")
@@ -303,7 +303,56 @@ def register_admin_routes(db, get_current_user, User):
         }
         await db.company_invites.insert_one(invite)
         invite.pop("_id", None)
-        return {"invite": invite}
+
+        # Optionally email the invite link via Resend
+        email_sent = False
+        email_error = None
+        if email:
+            try:
+                from email_utils import send_email, invite_email
+                # Resolve base URL: explicit origin_url > Origin header > Referer header
+                base_url = str(payload.get("origin_url") or "").rstrip("/")
+                if not base_url:
+                    base_url = (request.headers.get("origin") or "").rstrip("/")
+                if not base_url:
+                    ref = request.headers.get("referer") or ""
+                    if ref:
+                        from urllib.parse import urlparse
+                        p = urlparse(ref)
+                        if p.scheme and p.netloc:
+                            base_url = f"{p.scheme}://{p.netloc}"
+                if not base_url:
+                    raise RuntimeError("Davet bağlantısı için origin belirlenemedi")
+                join_url = f"{base_url}/join/{code}"
+                company_name = None
+                if company_id:
+                    co = await db.companies.find_one({"company_id": company_id}, {"_id": 0, "name": 1})
+                    company_name = co.get("name") if co else None
+                html = invite_email(
+                    inviter_email=user.email,
+                    company_name=company_name,
+                    role=role,
+                    join_url=join_url,
+                )
+                await send_email(
+                    to=email,
+                    subject="KırCan Report AI · Davetiye",
+                    html=html,
+                )
+                email_sent = True
+            except Exception as e:
+                import logging as _logging
+                _logging.getLogger(__name__).exception("Invite email dispatch failed")
+                raw = str(e)
+                # Sanitize provider-specific noise for the client
+                if "validation_error" in raw or "You can only send" in raw:
+                    email_error = "Alıcı adres Resend hesabınızda doğrulanmamış. Test modu için doğrulanmış e-posta kullanın."
+                elif "rate" in raw.lower():
+                    email_error = "E-posta gönderim hız limiti aşıldı. Kısa süre sonra tekrar deneyin."
+                else:
+                    email_error = "E-posta gönderilemedi. Lütfen daha sonra tekrar deneyin."
+
+        return {"invite": invite, "email_sent": email_sent, "email_error": email_error}
 
     @admin_router.get("/invites")
     async def list_invites(user: User = Depends(get_current_user)):

@@ -603,13 +603,15 @@ export function InviteDialog({ open, companies, onClose, onDone, isSuperAdmin })
   const submit = async () => {
     setBusy(true);
     try {
-      const payload = { role, email: email || undefined };
+      const payload = { role, email: email || undefined, origin_url: window.location.origin };
       if (isSuperAdmin) {
         if (companyId) payload.company_id = companyId;
         else if (companyName) payload.company_name = companyName;
       }
       const { data } = await api.post("/admin/invites", payload);
-      setResult(data.invite);
+      setResult({ ...data.invite, email_sent: data.email_sent, email_error: data.email_error });
+      if (data.email_sent) toast.success("Davet e-postası gönderildi");
+      else if (data.email_error) toast.warning("Davet oluşturuldu — e-posta gönderilemedi: " + data.email_error);
       onDone();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "İşlem başarısız");
@@ -666,6 +668,16 @@ export function InviteDialog({ open, companies, onClose, onDone, isSuperAdmin })
                 <Copy className="w-4 h-4" />
               </button>
             </div>
+            {result.email_sent && (
+              <div className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md p-2">
+                ✓ Davet e-postası gönderildi
+              </div>
+            )}
+            {result.email_error && (
+              <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-2">
+                E-posta gönderilemedi: {result.email_error}
+              </div>
+            )}
           </div>
         )}
         <DialogFooter>

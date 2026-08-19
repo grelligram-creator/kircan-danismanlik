@@ -1364,20 +1364,72 @@ async def download_report(chat_id: str, fmt: str, user: User = Depends(get_curre
 
 @api.post("/chats/{chat_id}/email")
 async def email_report(chat_id: str, user: User = Depends(get_current_user)):
-    """MOCK email dispatch — logs and returns success."""
+    """Generate the report DOCX and email it to the authenticated user via Resend."""
     chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
-    logger.info(f"[MOCK EMAIL] Report {chat['report_no']} sent to {user.email}")
+
+    # Render the DOCX to disk (same logic as /download/docx)
+    out_dir = REPORTS_DIR / chat_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    filename_base = f"rapor_{chat.get('report_no') or chat_id}"
+    out_path = out_dir / f"{filename_base}.docx"
+
+    if chat.get("user_template_id"):
+        ut = await _get_user_template(chat["user_template_id"])
+        if not ut or not _template_visible_to(ut, user):
+            raise HTTPException(status_code=404, detail="Template not found")
+        values = dict(chat.get("fields", {}))
+        image_paths: Dict[str, Any] = {}
+        clean_values: Dict[str, Any] = {}
+        for k, v in values.items():
+            if isinstance(v, dict) and v.get("__image__") and v.get("path"):
+                image_paths[k] = {"path": v["path"], "width_mm": v.get("width_mm", 80)}
+            else:
+                clean_values[k] = v
+        render_docx(ut["prepared_docx_path"], str(out_path), clean_values, image_paths)
+    else:
+        generate_docx(_report_payload(chat), str(out_path))
+
+    from email_utils import send_email, report_ready_email
+    template_name = chat.get("template_name") or "Değerleme Raporu"
+    html = report_ready_email(
+        user_name=user.name or user.email,
+        template_name=template_name,
+        report_no=chat.get("report_no") or chat_id,
+    )
+    try:
+        result = await send_email(
+            to=user.email,
+            subject=f"{template_name} · Rapor No {chat.get('report_no') or chat_id}",
+            html=html,
+            attachments=[{"path": str(out_path), "filename": out_path.name}],
+        )
+    except RuntimeError as e:
+        logger.error(f"Email dispatch failed: {e}")
+        await db.email_logs.insert_one({
+            "chat_id": chat_id,
+            "user_id": user.user_id,
+            "email": user.email,
+            "report_no": chat.get("report_no"),
+            "provider": "resend",
+            "status": "failed",
+            "error": str(e)[:400],
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+        })
+        raise HTTPException(status_code=502, detail=f"E-posta gönderilemedi: {e}")
+
     await db.email_logs.insert_one({
         "chat_id": chat_id,
         "user_id": user.user_id,
         "email": user.email,
         "report_no": chat.get("report_no"),
+        "provider": "resend",
+        "provider_message_id": result.get("id"),
+        "status": "sent",
         "sent_at": datetime.now(timezone.utc).isoformat(),
-        "mock": True,
     })
-    return {"success": True, "sent_to": user.email, "mock": True}
+    return {"success": True, "sent_to": user.email, "message_id": result.get("id")}
 
 
 # ============================================================

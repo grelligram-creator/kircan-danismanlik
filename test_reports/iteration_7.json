@@ -1,0 +1,36 @@
+{
+  "summary": "Backend-only testing of the Resend email integration. New suite /app/backend/tests/test_email_resend.py (18 tests) covers report email (real send + DOCX attachment + email_logs persistence + 404/401 paths), invite email (with verified email, without email, with Resend-rejected email, RBAC, revoke) and regression endpoints. 18/18 passed. Existing regression suite test_admin_kb_rbac.py re-run: 45/45 passed. Only 3 real emails were sent to the verified owner address (grelligram@gmail.com) to avoid rate limits.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/admin/invites", "issue": "If 'origin_url' is omitted while 'email' is provided, join_url becomes the relative path '/join/{code}' and the email is still sent (email_sent:true) with a non-clickable/broken link. Should either derive base URL from Referer/Origin header or return a 400/email_error."},
+      {"endpoint": "POST /api/admin/invites", "issue": "Dead code in admin_routes.py::create_invite (lines ~315-318: 'from fastapi import Request as _Req; base_url = \"\"') — leftover stub, remove."},
+      {"endpoint": "POST /api/admin/invites", "issue": "email_error returns the raw provider exception string to the client (leaks Resend internals/validation wording). Consider a sanitized user-facing message + full detail only in logs."},
+      {"endpoint": "POST /api/chats/{chat_id}/email", "issue": "Failed sends are not recorded in email_logs (only success path inserts). No audit trail for failures; also no rate limiting on a real-send endpoint (can be spammed by an authenticated user)."},
+      {"endpoint": "POST /api/chats/{chat_id}/email", "issue": "Generated DOCX files stay in /app/backend/generated_reports/{chat_id} forever with no cleanup; disk growth over time (18 stale dirs already present)."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_email_resend.py",
+    "/app/test_reports/pytest/pytest_email_resend.xml",
+    "/app/test_reports/pytest/pytest_rbac_regr.xml"
+  ],
+  "action_items": [
+    "Handle missing origin_url in create_invite (fallback to Origin/Referer header) so invite links are absolute",
+    "Remove dead code in create_invite and sanitize email_error before returning it",
+    "Optionally log failed email attempts in email_logs and add basic rate limiting/cleanup for generated report files"
+  ],
+  "critical_code_review_comments": [
+    "email_utils.send_email raises RuntimeError -> report endpoint returns 502 (correct), but invite endpoint swallows all exceptions into email_error; keep both but log with logger.exception in admin_routes too (currently silent).",
+    "Verified: no 'mock' field in the /email response; provider='resend' and provider_message_id (Resend UUID) persisted in email_logs; DOCX (36 KB) rendered to disk and base64-attached."
+  ],
+  "updated_files": ["/app/backend/tests/test_email_resend.py"],
+  "success_rate": {"backend": "100% (18/18 new + 45/45 regression)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "Used seeded super_admin/user sessions. Created 2 report chats + 4 invites during tests; all deleted by fixtures. Test email_logs rows and generated_reports dirs for test chats removed manually.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "session_token=test_super_admin_token (grelligram@gmail.com), session_token=test_session_seed_001",
+  "context_for_next_testing_agent": "Run `python -m pytest tests/test_email_resend.py` from /app/backend. It performs 2 real Resend sends to grelligram@gmail.com — do not loop it. Resend test mode rejects non-owner recipients with a ValidationError (example.com blocked) and the API correctly returns 200 + email_sent:false + email_error. KB list endpoint is /api/kb/list (not /api/kb/docs).",
+  "rca_of_the_issue": "No functional defects found. The only behavioural gap is the relative join_url fallback when origin_url is absent, caused by an unfinished Referer-header fallback in admin_routes.create_invite."
+}

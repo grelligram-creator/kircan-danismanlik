@@ -1,0 +1,35 @@
+{
+  "summary": "Backend-only verification of the invite-link base URL fix (APP_BASE_URL as source of truth). New suite /app/backend/tests/test_invite_baseurl.py (12 tests) — all pass. Confirmed POST /api/admin/invites always returns join_url = https://realestate-ai-flow.emergent.host/join/{code} even when a hostile Origin (random.example.com), Referer (referer.example.com) and origin_url payload (preview.example.com) are sent, proving the env var takes priority. GET /api/admin/invites returns join_url_prefix = '{APP_BASE_URL}/join'. invite_email() HTML renders the production URL and contains no preview host; one real Resend send to grelligram@gmail.com returned email_sent=true with the production join_url. Also curl-verified the production host is actually reachable (GET / -> 200, GET /join/inv_test -> 200), so shared links no longer hit 'site can't be reached'. Regression: test_admin_kb_rbac.py 45/45 pass; test_email_resend.py 17/17 pass (report email real send with DOCX attachment included; deselected only the duplicate invite real-send to respect the 1-2 email limit). Total 74 tests passed, 0 failed. All invites created during testing were revoked and the on-the-fly TEST_InviteCo company was deleted.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/admin/invites (role=admin)", "issue": "A company is created on-the-fly before the invite; DELETE /api/admin/invites/{code} does not remove that company, leaving orphan companies with no admin_user_id. Consider cleanup on revoke or lazy company creation at join time."},
+      {"endpoint": "admin_routes.py::create_invite", "issue": "Inline imports (os, urllib.parse) inside the handler and duplicated base-URL resolution logic in create_invite and list_invites — extract a single helper (e.g. get_app_base_url(request)) to keep both endpoints in sync."},
+      {"endpoint": "config", "issue": "APP_BASE_URL is unvalidated at startup; if it were ever set to an empty/typo value the endpoint silently falls back to a relative '/join/{code}'. Log a startup warning when APP_BASE_URL is missing."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_invite_baseurl.py",
+    "/app/test_reports/pytest/pytest_invite_baseurl.xml",
+    "/app/test_reports/pytest/pytest_rbac_regr2.xml",
+    "/app/test_reports/pytest/pytest_email_regr2.xml"
+  ],
+  "action_items": [
+    "Optional: delete/avoid the auto-created company when an admin invite is revoked (orphan company records)",
+    "Optional: refactor duplicated APP_BASE_URL resolution into one helper and warn at startup if unset",
+    "Housekeeping: 2 orphan 'TEST_Sirket A.Ş.' companies from earlier iterations remain in DB (not created by this run)"
+  ],
+  "critical_code_review_comments": [
+    "Fix is correct and effective: canonical_join_url is computed before the email branch, so the emailed link and the API response can never diverge; APP_BASE_URL wins over origin_url/Origin/Referer as intended.",
+    "Frontend wiring verified by code read only (backend-only request): SuperAdmin.jsx uses result.join_url for display+copy and invitePrefix for the list copy button; AdminPanel.jsx uses invitePrefix. window.location.origin remains only as a last-resort fallback, which is acceptable."
+  ],
+  "updated_files": ["/app/backend/tests/test_invite_baseurl.py"],
+  "success_rate": {"backend": "100% (74/74: 12 new + 45 rbac + 17 email)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "Used seeded super_admin (test_super_admin_token) and user (test_session_seed_001). Created 4 invites + 1 company (TEST_InviteCo) — all deleted after the run; invites collection verified empty.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "cookie session_token=test_super_admin_token (grelligram@gmail.com), cookie session_token=test_session_seed_001",
+  "context_for_next_testing_agent": "Run `python -m pytest tests/test_invite_baseurl.py` from /app/backend — it performs exactly 1 real Resend send to grelligram@gmail.com. Do not loop it. APP_BASE_URL in backend/.env is the source of truth for join links; assert against it rather than hardcoding. test_email_resend.py also sends 2 real emails, deselect TestInviteEmail::test_invite_with_verified_email_real_send when re-running alongside the invite suite. Production host https://realestate-ai-flow.emergent.host is live (200).",
+  "rca_of_the_issue": "Original bug: join links were built from the browser origin, which in the preview environment is the preview host that external invitees cannot reach. Fix verified: backend now derives the link from APP_BASE_URL (production host) with highest priority and returns join_url / join_url_prefix so the frontend never constructs the URL itself. Reproduced hostile-origin scenarios confirm the env value always wins."
+}

@@ -17,6 +17,7 @@ export default function AdminPanel() {
   const [users, setUsers] = useState([]);
   const [company, setCompany] = useState(null);
   const [invites, setInvites] = useState([]);
+  const [invitePrefix, setInvitePrefix] = useState("");
   const [showTopup, setShowTopup] = useState(null);
   const [showInvite, setShowInvite] = useState(false);
 
@@ -30,6 +31,7 @@ export default function AdminPanel() {
       setUsers(u.data.users || []);
       setCompany((c.data.companies || [])[0] || null);
       setInvites(i.data.invites || []);
+      setInvitePrefix(i.data.join_url_prefix || "");
     } catch (e) {
       toast.error("Veri yüklenemedi");
     }
@@ -163,7 +165,7 @@ export default function AdminPanel() {
                   <td className="p-3 text-xs">
                     <div className="flex items-center gap-2">
                       <code className="bg-zinc-100 px-2 py-1 rounded">{iv.code.substring(0, 18)}...</code>
-                      <button onClick={() => { navigator.clipboard.writeText(`${window.location.origin}/join/${iv.code}`); toast.success("Kopyalandı"); }}>
+                      <button onClick={() => { const url = invitePrefix ? `${invitePrefix}/${iv.code}` : `${window.location.origin}/join/${iv.code}`; navigator.clipboard.writeText(url); toast.success("Kopyalandı"); }}>
                         <Copy className="w-3.5 h-3.5 text-zinc-500" />
                       </button>
                     </div>

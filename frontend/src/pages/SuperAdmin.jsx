@@ -21,6 +21,7 @@ export default function SuperAdminPanel() {
   const [users, setUsers] = useState([]);
   const [companies, setCompanies] = useState([]);
   const [invites, setInvites] = useState([]);
+  const [invitePrefix, setInvitePrefix] = useState("");
   const [summary, setSummary] = useState(null);
   const [selectedUser, setSelectedUser] = useState(null);
   const [showTopup, setShowTopup] = useState(false);
@@ -41,6 +42,7 @@ export default function SuperAdminPanel() {
       setUsers(u.data.users || []);
       setCompanies(c.data.companies || []);
       setInvites(i.data.invites || []);
+      setInvitePrefix(i.data.join_url_prefix || "");
       setSummary(s.data);
     } catch (e) {
       toast.error("Veri yüklenemedi");
@@ -302,7 +304,7 @@ export default function SuperAdminPanel() {
                           <code className="text-xs bg-zinc-100 px-2 py-1 rounded">{iv.code}</code>
                           <button
                             onClick={() => {
-                              const url = `${window.location.origin}/join/${iv.code}`;
+                              const url = invitePrefix ? `${invitePrefix}/${iv.code}` : `${window.location.origin}/join/${iv.code}`;
                               navigator.clipboard.writeText(url);
                               toast.success("Davet linki kopyalandı");
                             }}
@@ -609,7 +611,7 @@ export function InviteDialog({ open, companies, onClose, onDone, isSuperAdmin })
         else if (companyName) payload.company_name = companyName;
       }
       const { data } = await api.post("/admin/invites", payload);
-      setResult({ ...data.invite, email_sent: data.email_sent, email_error: data.email_error });
+      setResult({ ...data.invite, join_url: data.join_url, email_sent: data.email_sent, email_error: data.email_error });
       if (data.email_sent) toast.success("Davet e-postası gönderildi");
       else if (data.email_error) toast.warning("Davet oluşturuldu — e-posta gönderilemedi: " + data.email_error);
       onDone();
@@ -657,10 +659,10 @@ export function InviteDialog({ open, companies, onClose, onDone, isSuperAdmin })
           <div className="space-y-3">
             <div className="text-sm text-zinc-700">Davet bağlantısı oluşturuldu. Kopyalayıp gönderin:</div>
             <div className="bg-zinc-50 border border-zinc-200 rounded-md p-3 flex items-center gap-2">
-              <code className="flex-1 text-xs break-all">{window.location.origin}/join/{result.code}</code>
+              <code className="flex-1 text-xs break-all">{result.join_url || `${window.location.origin}/join/${result.code}`}</code>
               <button
                 onClick={() => {
-                  navigator.clipboard.writeText(`${window.location.origin}/join/${result.code}`);
+                  navigator.clipboard.writeText(result.join_url || `${window.location.origin}/join/${result.code}`);
                   toast.success("Kopyalandı");
                 }}
                 className="text-[var(--brand-navy)]"

@@ -304,26 +304,31 @@ def register_admin_routes(db, get_current_user, User):
         await db.company_invites.insert_one(invite)
         invite.pop("_id", None)
 
+        # Always compute the canonical join URL (production if APP_BASE_URL set)
+        import os as _os
+        from urllib.parse import urlparse as _urlparse
+        _canonical_base = str(_os.environ.get("APP_BASE_URL", "")).rstrip("/")
+        if not _canonical_base:
+            _canonical_base = str(payload.get("origin_url") or "").rstrip("/")
+        if not _canonical_base:
+            _canonical_base = (request.headers.get("origin") or "").rstrip("/")
+        if not _canonical_base:
+            _ref = request.headers.get("referer") or ""
+            if _ref:
+                _p = _urlparse(_ref)
+                if _p.scheme and _p.netloc:
+                    _canonical_base = f"{_p.scheme}://{_p.netloc}"
+        canonical_join_url = f"{_canonical_base}/join/{code}" if _canonical_base else f"/join/{code}"
+
         # Optionally email the invite link via Resend
         email_sent = False
         email_error = None
         if email:
             try:
                 from email_utils import send_email, invite_email
-                # Resolve base URL: explicit origin_url > Origin header > Referer header
-                base_url = str(payload.get("origin_url") or "").rstrip("/")
-                if not base_url:
-                    base_url = (request.headers.get("origin") or "").rstrip("/")
-                if not base_url:
-                    ref = request.headers.get("referer") or ""
-                    if ref:
-                        from urllib.parse import urlparse
-                        p = urlparse(ref)
-                        if p.scheme and p.netloc:
-                            base_url = f"{p.scheme}://{p.netloc}"
-                if not base_url:
+                join_url = canonical_join_url
+                if not _canonical_base:
                     raise RuntimeError("Davet bağlantısı için origin belirlenemedi")
-                join_url = f"{base_url}/join/{code}"
                 company_name = None
                 if company_id:
                     co = await db.companies.find_one({"company_id": company_id}, {"_id": 0, "name": 1})
@@ -352,15 +357,19 @@ def register_admin_routes(db, get_current_user, User):
                 else:
                     email_error = "E-posta gönderilemedi. Lütfen daha sonra tekrar deneyin."
 
-        return {"invite": invite, "email_sent": email_sent, "email_error": email_error}
+        return {"invite": invite, "join_url": canonical_join_url, "email_sent": email_sent, "email_error": email_error}
 
     @admin_router.get("/invites")
-    async def list_invites(user: User = Depends(get_current_user)):
+    async def list_invites(request: Request, user: User = Depends(get_current_user)):
         if not is_admin_or_super(user):
             raise HTTPException(status_code=403, detail="Yetkisiz")
         q = {} if is_super_admin(user) else {"company_id": user.company_id}
         invites = await db.company_invites.find(q, {"_id": 0}).sort("created_at", -1).limit(100).to_list(100)
-        return {"invites": invites}
+        import os as _os
+        base = str(_os.environ.get("APP_BASE_URL", "")).rstrip("/")
+        if not base:
+            base = (request.headers.get("origin") or "").rstrip("/")
+        return {"invites": invites, "join_url_prefix": f"{base}/join" if base else "/join"}
 
     @admin_router.delete("/invites/{code}")
     async def revoke_invite(code: str, user: User = Depends(get_current_user)):

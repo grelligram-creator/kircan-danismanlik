@@ -96,6 +96,13 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - **Backend routers** — `admin_routes.py` (all `/api/admin/*`), `knowledge_base.py` (all `/api/kb/*`), registered via `register_admin_routes(db, get_current_user, User)` factories to keep server.py imports acyclic.
 - **New Mongo collections** — `companies`, `company_invites`, `company_ledger`, `wallet_ledger`, `kb_docs`.
 
+## Implemented (v6 — Feb 2026 · Invite Link Base URL Fix)
+- **Bug fix — "site cannot be reached" on shared invite links**: Root cause was invite URLs being built from `window.location.origin`, which in preview mode is the preview host that external invitees cannot access.
+- **Solution**: New `APP_BASE_URL` env in `backend/.env` (set to `https://realestate-ai-flow.emergent.host`). Backend `create_invite` and `list_invites` now compute a canonical `join_url` using this env as highest priority (falls back to `origin_url` payload → Origin → Referer if unset).
+- **API surface**: `POST /api/admin/invites` response now returns `join_url` field. `GET /api/admin/invites` returns `join_url_prefix`. Both point to production URL.
+- **Frontend**: SuperAdmin & AdminPanel invite copy buttons now use backend-provided URLs; `window.location.origin` only as last-resort fallback.
+- **Verification**: 74/74 backend tests pass (12 new invite-URL tests + 45 RBAC + 17 email regression). Real Resend email confirmed to render production URL. Production host reachable (200).
+
 ## Implemented (v5 — Feb 2026 · Real Email via Resend)
 - **Resend integration** — `backend/email_utils.py`: async wrapper via `asyncio.to_thread`, branded HTML template (navy/gold, table layout, inline CSS), base64 attachment support.
 - **Report email now real** — `/api/chats/{chat_id}/email` renders the DOCX (user template or built-in), attaches it, sends via Resend. `email_logs` records `provider='resend'`, `provider_message_id`, and `status` (sent | failed) with sanitized error string for failures.

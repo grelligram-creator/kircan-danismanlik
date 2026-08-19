@@ -1,0 +1,30 @@
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@200;300;400;500;600;700;800&family=IBM+Plex+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap");
+
+/* Font utility classes */
+.font-body { font-family: "IBM Plex Sans", system-ui, sans-serif; }
+.font-serif { font-family: "Instrument Serif", Georgia, serif; }
+.font-mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #fafafa;
+  color: #0a0a0a;
+}
+
+h1, h2, h3, h4 {
+  font-family: "Manrope", system-ui, sans-serif;
+  letter-spacing: -0.02em;
+}
+
+/* Selection */
+::selection { background: #0a0a0a; color: #ffffff; }
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d4d4d8; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #a1a1aa; }

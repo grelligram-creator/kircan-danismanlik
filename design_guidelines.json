@@ -1,0 +1,112 @@
+{
+  "project_name": "n8n Real Estate Valuation AI (Gayrimenkul Değerleme Uzmanlığı)",
+  "app_type": "B2B SaaS AI Chat & Document Generator",
+  "theme": "Light mode by default (with Dark mode toggle capability). Light mode strongly preferred for document reading and valuation precision.",
+  "archetype": "Swiss & High-Contrast (Authority, Clarity, Truth)",
+  "typography": {
+    "headings": {
+      "font": "Manrope",
+      "instruction": "Use for all H1-H4. Must use tight letter spacing (tracking-tight). Banned: Inter, Roboto, Open Sans.",
+      "weights": "font-light for elegant large headings, font-black for high-impact metric numbers."
+    },
+    "body": {
+      "font": "IBM Plex Sans",
+      "instruction": "Use for all chat messages, document text, and functional UI text. Highly legible for data.",
+      "weights": "font-normal to font-medium"
+    },
+    "mono": {
+      "font": "JetBrains Mono",
+      "instruction": "Use for small data labels, credit balances, and system logs."
+    },
+    "scale": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tighter leading-none",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight leading-tight",
+      "h3": "text-xl sm:text-2xl tracking-tight",
+      "body": "text-base leading-relaxed text-zinc-700 dark:text-zinc-300",
+      "small_labels": "text-xs font-mono uppercase tracking-[0.2em]"
+    }
+  },
+  "colors": {
+    "philosophy": "Color is Function Only. 95% of the UI should be monochrome. Color exists only to guide action or indicate AI processing.",
+    "backgrounds": {
+      "app": "bg-zinc-50 dark:bg-zinc-950",
+      "chat_panel": "bg-white dark:bg-zinc-900",
+      "document_panel_wrapper": "bg-zinc-100/50 dark:bg-zinc-950",
+      "document_paper": "bg-white dark:bg-zinc-900 shadow-sm ring-1 ring-zinc-200 dark:ring-zinc-800"
+    },
+    "text": {
+      "primary": "text-zinc-950 dark:text-zinc-50",
+      "secondary": "text-zinc-600 dark:text-zinc-400"
+    },
+    "actions": {
+      "primary_button": "bg-zinc-950 text-white hover:bg-zinc-800 dark:bg-zinc-50 dark:text-zinc-900",
+      "ai_accent": "text-[#0055FF] bg-[#0055FF]/10",
+      "warning_upsell": "text-amber-600 bg-amber-50"
+    },
+    "borders": "border-zinc-200 dark:border-zinc-800"
+  },
+  "visual_enhancers": {
+    "surfaces": "Grid Borders (The Technical Look). Container layouts should use border-collapse style to expose the skeleton. Divide the sidebar, chat, and document areas with crisp 1px borders (border-r border-border).",
+    "glassmorphism": "Avoid glassmorphism for this professional app. Use Flat Solid surfaces to prevent visual refraction of dense document data.",
+    "shadows": "Minimalist. Use sharp 1px borders for definition instead of large diffuse shadows."
+  },
+  "layouts": {
+    "login_page": {
+      "pattern": "Asymmetric Split Screen",
+      "left": "w-full lg:w-7/12 h-screen relative bg-zinc-950. Use Image [0] with bg-black/40 overlay. Add a massive, typography-driven brand statement.",
+      "right": "w-full lg:w-5/12 h-screen flex flex-col justify-center items-center p-12 lg:p-24 bg-white. Google Sign-In button prominent."
+    },
+    "dashboard": {
+      "pattern": "High Density Grid / Three-Pane View",
+      "wrapper": "h-screen w-full flex overflow-hidden bg-zinc-50",
+      "sidebar": "w-64 border-r border-zinc-200 bg-zinc-50 flex flex-col justify-between flex-shrink-0. Contains Chat History, FAQ toggle, and bottom pinned Credit Status/Upsell trigger.",
+      "main_split": "flex-1 flex (Use shadcn ResizablePanelGroup for dynamic sizing).",
+      "chat_panel": "flex-1 flex flex-col min-w-[300px] border-r border-zinc-200 bg-white. Scrollable message list + pinned bottom input area with file upload (PDF/XLSX/DOCX).",
+      "document_preview_panel": "flex-1 bg-zinc-100/50 flex flex-col min-w-[300px]. Top sticky header with 'Download' and 'Email' actions. Content area centers a 'physical A4 paper' styled div."
+    }
+  },
+  "component_instructions": {
+    "forms_inputs": "Use Shadcn components. No native inputs. Squared or slightly rounded (max rounded-md) borders.",
+    "buttons": "Shadcn buttons. Crisp edges (rounded-md). High contrast focus states.",
+    "toasts": "Use 'sonner' for credit deductions, error handling, and email dispatch confirmations.",
+    "resizable_panels": "MANDATORY: Use Shadcn `Resizable` (react-resizable-panels) for the main split between Chat and Document Preview.",
+    "modals": "Use Shadcn `Dialog` for the 'Low Credit Upsell' and 'Select Report Template' flows."
+  },
+  "features_flow": {
+    "template_selector": "On new chat, show a Bento-grid of Report Templates (e.g., Konut, Ticari, Arsa) fetched conceptually from the Knowledge Base.",
+    "chat_interface": "Claude-style interface. AI asks questions sequentially. User uploads PDFs/Excels, AI analyzes and populates the document.",
+    "live_document": "The right panel updates in real-time as the chat progresses. Highlight newly added sections in the document briefly.",
+    "credit_system": "Persistent badge in sidebar. Deduct dynamically. If balance drops to 0, trigger a non-dismissible Dialog for Upsell."
+  },
+  "icons": {
+    "library": "lucide-react",
+    "usage": "Use sharp, professional icons. Avoid emoji."
+  },
+  "images": {
+    "login_hero": {
+      "url": "https://images.pexels.com/photos/37853255/pexels-photo-37853255.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "Black and white modern building facade. Use as full-height background for the left side of the login page."
+    },
+    "document_empty_state": {
+      "url": "https://images.unsplash.com/photo-1529078155058-5d716f45d604?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTB8MHwxfHNlYXJjaHwxfHxkb2N1bWVudCUyMGFuYWx5c2lzJTIwdGVjaG5vbG9neSUyMGFic3RyYWN0fGVufDB8fHx8MTc4NzEzNzE3N3ww&ixlib=rb-4.1.0&q=85",
+      "description": "White printing paper with numbers. Use as a subtle, low-opacity background or illustration in the Document Preview panel before a report is generated."
+    },
+    "report_blueprint_header": {
+      "url": "https://images.pexels.com/photos/4134179/pexels-photo-4134179.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "Architectural blueprints. Can be used as a branded header image inside the generated report preview."
+    }
+  },
+  "universal_guidelines_for_main_agent": [
+    "No centered layouts for standard content. Left-align text, labels, and forms for rapid readability.",
+    "Always apply 'data-testid' to interactive elements (e.g., data-testid='upload-document-button', data-testid='upsell-modal-trigger').",
+    "Use 2-3x more padding than usual. Even dense data grids need breathing room.",
+    "Never use generic transition: all. Use specific transition-colors, transition-transform.",
+    "Ensure high contrast hover states (e.g., hover:bg-zinc-800 hover:text-white).",
+    "For the file upload zone, implement a dashed border with a subtle drag-and-drop hover state.",
+    "Implement the UI entirely in Turkish as requested by the user, but keep internal variable names and test IDs in English."
+  ],
+  "accessibility": {
+    "contrast": "Ensure text over any backgrounds meets APCA standards. Do not use pure grey, tint greys slightly if needed, but strict monochrome works best here.",
+    "focus": "All buttons and inputs must have visible focus rings (e.g., focus:ring-2 focus:ring-zinc-950 focus:ring-offset-2)."
+  }
+}

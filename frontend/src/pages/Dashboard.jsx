@@ -131,6 +131,7 @@ export default function Dashboard() {
                 onStreamDelta={handleStreamDelta}
                 onStreamDone={handleStreamDone}
                 onLowBalance={() => setShowWallet(true)}
+                onFieldsUpdated={loadChats}
               />
             </ResizablePanel>
             <ResizableHandle withHandle />

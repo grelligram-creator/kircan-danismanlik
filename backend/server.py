@@ -396,6 +396,77 @@ async def _claude_call(system: str, user_text: str) -> str:
     return resp.content if hasattr(resp, "content") else str(resp)
 
 
+async def _claude_vision_extract(
+    system: str,
+    user_text: str,
+    files: List[Dict[str, Any]],
+) -> Tuple[str, Optional[Any]]:
+    """Multimodal extraction with Claude Sonnet 5.
+
+    files: list of {"path": str, "mime_type": str, "filename": str}
+    - Images (jpg/png/webp/tiff → normalized to PNG) → ImageContent(image_base64=...)
+    - PDFs → pypdf text extraction, appended to user_text as inline document blocks
+    Uses stream_message so we can read StreamDone.usage for accurate token counting.
+    """
+    from emergentintegrations.llm.chat import ImageContent
+    import base64 as _b64
+    import io as _io
+    from PIL import Image as _PILImage
+
+    image_contents: List[Any] = []
+    text_blocks: List[str] = [user_text]
+
+    for f in files:
+        p = Path(f["path"])
+        mt = (f.get("mime_type") or "").lower()
+        fname = f.get("filename") or p.name
+        try:
+            if mt.startswith("image/"):
+                # Normalize to PNG for maximum Claude Vision compatibility.
+                with _PILImage.open(p) as im:
+                    im.load()
+                    if im.mode not in ("RGB", "RGBA"):
+                        im = im.convert("RGB")
+                    buf = _io.BytesIO()
+                    im.save(buf, format="PNG", optimize=True)
+                    b64 = _b64.b64encode(buf.getvalue()).decode("ascii")
+                image_contents.append(ImageContent(image_base64=b64))
+            elif mt == "application/pdf":
+                # Extract text (fast + cheap); avoid Vision on PDFs since we have no PDF-to-image renderer.
+                extracted = parse_uploaded_file(str(p))
+                extracted = (extracted or "").strip()
+                if extracted:
+                    # Trim to 15k chars to protect context window
+                    text_blocks.append(f"\n### PDF: {fname}\n{extracted[:15000]}")
+                else:
+                    text_blocks.append(f"\n### PDF: {fname}\n(Metin çıkarılamadı — resim/tarama olabilir)")
+        except Exception as e:
+            logger.warning(f"Autofill: skipping {fname}: {e}")
+
+    llm = (
+        LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"autofill_{uuid.uuid4().hex[:8]}",
+            system_message=system,
+        )
+        .with_model("anthropic", "claude-sonnet-5")
+        .with_params(max_tokens=2048)
+    )
+    msg = UserMessage(text="\n".join(text_blocks), file_contents=image_contents or None)
+
+    # Stream to capture StreamDone.usage — send_message returns a plain str without usage.
+    parts: List[str] = []
+    usage = None
+    async for event in llm.stream_message(msg):
+        if isinstance(event, TextDelta):
+            parts.append(event.content)
+        elif isinstance(event, StreamDone):
+            usage = getattr(event, "usage", None)
+            break
+    return "".join(parts), usage
+
+
+
 async def _get_user_template(tid: str) -> Optional[Dict[str, Any]]:
     return await db.user_templates.find_one({"template_id": tid}, {"_id": 0})
 
@@ -949,6 +1020,249 @@ def _cost_for_chat(chat: Dict[str, Any]) -> float:
     return float(tpl["cost_per_message"]) if tpl else 5.0
 
 
+@api.post("/chats/{chat_id}/autofill")
+async def autofill_chat_from_attachments(
+    chat_id: str,
+    payload: Dict[str, Any],
+    user: User = Depends(get_current_user),
+):
+    """Vision-based autofill: read attached documents (PDF/JPG/PNG/TIFF) and extract
+    field values that match the chat's template.
+
+    Payload:
+      - attachment_ids: list of upload_ids to analyze (required, min 1)
+      - min_balance_ok: bool (frontend confirms user acknowledged cost)
+
+    Behavior:
+      - Cost is charged proportional to actual token usage (measured post-call).
+      - Returns {fields, duplicates, out_of_scope, notes, tokens, cost_try}.
+      - Frontend must send a PATCH /chats/{id}/fields with the accepted fields.
+    """
+    chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    attachment_ids = payload.get("attachment_ids") or []
+    if not attachment_ids or not isinstance(attachment_ids, list):
+        raise HTTPException(status_code=400, detail="En az bir ek dosya seçmelisiniz")
+    # Cap batch size to protect users from runaway costs on huge multi-file uploads
+    MAX_ATTACHMENTS = 10
+    if len(attachment_ids) > MAX_ATTACHMENTS:
+        raise HTTPException(status_code=400, detail=f"En fazla {MAX_ATTACHMENTS} dosya aynı anda analiz edilebilir")
+
+    # Balance sanity check — reserve a nominal amount up front; refund/charge exact after.
+    NOMINAL_HOLD = 5.0
+    reserved = await db.users.find_one_and_update(
+        {"user_id": user.user_id, "wallet_balance": {"$gte": NOMINAL_HOLD}},
+        {"$inc": {"wallet_balance": -NOMINAL_HOLD}},
+        return_document=True,
+    )
+    if not reserved:
+        raise HTTPException(status_code=402, detail={
+            "error": "insufficient_balance", "required": NOMINAL_HOLD,
+            "balance": user.wallet_balance,
+        })
+
+    # Resolve attachments — download from Object Storage to temp local files
+    from storage_utils import get_object_to_file
+    import shutil as _shutil
+    tmp_dir = REPORTS_DIR / chat_id / "_autofill"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    def _cleanup_tmp():
+        try:
+            _shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+        try:
+            (REPORTS_DIR / chat_id).rmdir()  # remove parent if empty
+        except Exception:
+            pass
+
+    files: List[Dict[str, Any]] = []
+    for aid in attachment_ids:
+        doc = await db.uploads.find_one({"upload_id": aid, "user_id": user.user_id}, {"_id": 0})
+        if not doc:
+            continue
+        ct = doc.get("content_type") or "application/octet-stream"
+        if not any(ct.startswith(prefix) for prefix in ("image/", "application/pdf")):
+            continue  # only image and PDF for Vision
+        fname = doc.get("filename", "file")
+        dest = tmp_dir / f"{aid}_{fname}"
+        try:
+            if doc.get("storage_path"):
+                await get_object_to_file(doc["storage_path"], dest)
+            elif doc.get("path") and Path(doc["path"]).exists():
+                dest.write_bytes(Path(doc["path"]).read_bytes())
+            else:
+                continue
+            files.append({"path": str(dest), "mime_type": ct, "upload_id": aid, "filename": fname})
+        except Exception as e:
+            logger.warning(f"Autofill: could not load {aid}: {e}")
+
+    if not files:
+        # refund hold + cleanup temp dir
+        await db.users.update_one({"user_id": user.user_id}, {"$inc": {"wallet_balance": NOMINAL_HOLD}})
+        _cleanup_tmp()
+        raise HTTPException(status_code=400, detail="Analiz edilebilir görsel/PDF eki bulunamadı")
+
+    # Build field list from template
+    tpl = _template_by_id(chat.get("template_id", "")) if chat.get("template_id") else None
+    ut = await _get_user_template(chat["user_template_id"]) if chat.get("user_template_id") else None
+    if tpl:
+        target_fields = [{"key": f["key"], "label": f["label"]} for f in tpl["fields"]]
+        template_name = tpl["name"]
+    elif ut:
+        target_fields = [{"key": f["key"], "label": f.get("label", f["key"]), "type": f.get("type", "text")}
+                         for f in ut.get("fields", [])]
+        template_name = ut.get("name", "Özel Şablon")
+    else:
+        await db.users.update_one({"user_id": user.user_id}, {"$inc": {"wallet_balance": NOMINAL_HOLD}})
+        _cleanup_tmp()
+        raise HTTPException(status_code=400, detail="Bu sohbete bağlı şablon bulunamadı")
+
+    fields_json = json.dumps(target_fields, ensure_ascii=False)
+
+    system = (
+        "Sen KırCan Report AI'sın — Türk gayrimenkul değerleme uzmanı asistanı. "
+        "Yüklenen belgeleri (tapu, imar planı, yapı ruhsatı, yer görme, emsal listesi vb.) analiz edip "
+        "verilen şablon alanlarına uygun değerleri çıkaran deneyimli bir uzmansın.\n\n"
+        "KURALLAR:\n"
+        "1. Sadece belgelerde AÇIKÇA yazılı bilgilerden değer üret. Tahmin YAPMA.\n"
+        "2. Aynı alan için farklı belgelerde farklı değer varsa 'duplicates' listesine ekle.\n"
+        "3. Belge KAPSAM DIŞI ise (tapu/imar/emsal/değerleme değilse) out_of_scope=true dön ve neden yaz.\n"
+        "4. Değeri bulamadığın alanları atla, boş string dönme.\n"
+        "5. Sadece geçerli JSON dön, açıklama YOK.\n\n"
+        f"HEDEF ŞABLON: {template_name}\n"
+        f"HEDEF ALANLAR: {fields_json}\n\n"
+        "ÇIKTI FORMATI (SADECE JSON):\n"
+        "{\n"
+        '  "fields": {"field_key": "değer", ...},\n'
+        '  "duplicates": [{"field": "key", "values": [{"source": "dosya adı", "value": "..."}, ...]}],\n'
+        '  "out_of_scope": [{"filename": "...", "reason": "..."}],\n'
+        '  "notes": "kısa açıklama"\n'
+        "}"
+    )
+    user_text = (
+        f"Ekli {len(files)} dosyayı analiz et ve şablon alanlarını doldur. "
+        f"Belge adları: {', '.join(f['filename'] for f in files)}."
+    )
+
+    try:
+        text, usage = await _claude_vision_extract(system, user_text, files)
+    except Exception as e:
+        await db.users.update_one({"user_id": user.user_id}, {"$inc": {"wallet_balance": NOMINAL_HOLD}})
+        _cleanup_tmp()
+        logger.exception("Vision autofill failed")
+        # Use 400 (not 502) so the JSON body reaches the client instead of a generic ingress HTML page.
+        raise HTTPException(status_code=400, detail=f"Analiz başarısız: {e}")
+
+    # Parse JSON out of the response (LLM may wrap in ```json ... ```)
+    parsed: Dict[str, Any] = {}
+    try:
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("```", 2)[1]
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:]
+            cleaned = cleaned.strip().rstrip("`").strip()
+        parsed = json.loads(cleaned)
+    except Exception:
+        # Fallback: try to find { ... } block
+        try:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end > start:
+                parsed = json.loads(text[start:end + 1])
+        except Exception:
+            parsed = {}
+
+    # Compute actual cost from token usage (fallback: nominal hold as flat fee)
+    in_tok = int(getattr(usage, "input_tokens", 0) or 0) if usage else 0
+    out_tok = int(getattr(usage, "output_tokens", 0) or 0) if usage else 0
+    usd_try = float(os.environ.get("USD_TRY_RATE", "42"))
+    actual_usd = (in_tok / 1_000_000.0) * 2.0 + (out_tok / 1_000_000.0) * 10.0
+    # 30% markup for Vision autofill (multi-file processing effort). Min 1 TL if we got real tokens.
+    charged_try = max(round(actual_usd * usd_try * 1.30, 2), 1.0) if in_tok else NOMINAL_HOLD
+    # Reconcile wallet: refund excess hold, but never go negative
+    delta = NOMINAL_HOLD - charged_try
+    if delta > 0:
+        # Refund unused hold
+        await db.users.update_one({"user_id": user.user_id}, {"$inc": {"wallet_balance": delta}})
+    elif delta < 0:
+        # Actual cost exceeded hold — atomically deduct the extra, only if wallet can cover it
+        extra = -delta
+        deducted = await db.users.find_one_and_update(
+            {"user_id": user.user_id, "wallet_balance": {"$gte": extra}},
+            {"$inc": {"wallet_balance": -extra}},
+            return_document=True,
+        )
+        if not deducted:
+            # Not enough — cap charge at what was reserved
+            charged_try = NOMINAL_HOLD
+            delta = 0
+
+    # Log usage event (proportional cost model)
+    await db.usage_events.insert_one({
+        "user_id": user.user_id,
+        "chat_id": chat_id,
+        "mode": "autofill",
+        "cost": float(charged_try),
+        "input_tokens": in_tok,
+        "output_tokens": out_tok,
+        "actual_ai_cost_usd": round(actual_usd, 6),
+        "actual_ai_cost_try": round(actual_usd * usd_try, 4),
+        "file_count": len(files),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+    # Cleanup temp files + directory (uses shared helper to guarantee identical behavior on success/failure)
+    _cleanup_tmp()
+
+    # Read current wallet post-reconciliation (safer than computing from stale `reserved`)
+    latest_user = await db.users.find_one({"user_id": user.user_id}, {"wallet_balance": 1, "_id": 0})
+    new_balance = round(float((latest_user or {}).get("wallet_balance", 0)), 2)
+    return {
+        "success": True,
+        "fields": parsed.get("fields") or {},
+        "duplicates": parsed.get("duplicates") or [],
+        "out_of_scope": parsed.get("out_of_scope") or [],
+        "notes": parsed.get("notes") or "",
+        "tokens": {"input": in_tok, "output": out_tok},
+        "cost_try": charged_try,
+        "wallet_balance": new_balance,
+        "files_analyzed": len(files),
+    }
+
+
+@api.patch("/chats/{chat_id}/fields")
+async def patch_chat_fields(
+    chat_id: str,
+    payload: Dict[str, Any],
+    user: User = Depends(get_current_user),
+):
+    """Merge accepted autofill values (or user overrides) into chat.fields.
+
+    Payload: {"fields": {key: value, ...}, "clear": [keys]}
+    """
+    chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    new_fields = dict(chat.get("fields", {}))
+    incoming = payload.get("fields") or {}
+    if isinstance(incoming, dict):
+        for k, v in incoming.items():
+            if v in (None, ""):
+                new_fields.pop(k, None)
+            else:
+                new_fields[k] = v
+    for k in (payload.get("clear") or []):
+        new_fields.pop(k, None)
+    await db.chats.update_one({"chat_id": chat_id}, {"$set": {"fields": new_fields}})
+    return {"success": True, "fields": new_fields}
+
+
+
 @api.post("/chats/{chat_id}/message")
 async def send_message(
     chat_id: str,
@@ -1023,11 +1337,24 @@ async def send_message(
             + "Bilgi çelişirse en güncel ve KırCan kaynağını tercih et.\n\n"
             + kb_context
         )
-    llm = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=chat_id,
-        system_message=system_prompt,
-    ).with_model("anthropic", "claude-sonnet-5")
+    # Scope + brevity guard — added to every system prompt
+    system_prompt = (
+        system_prompt
+        + "\n\n## Yanıt Disiplini\n"
+        + "- Sadece gayrimenkul değerleme uzmanlığı, rapor hazırlama ve KırCan bilgi bankası kapsamında yanıt ver.\n"
+        + "- Kapsam dışı sorular için: 'Bu konu KırCan Report AI kapsamı dışında.' de ve konuya geri yönlendir.\n"
+        + "- Kısa, öz, doğrudan cevap ver. Gereksiz açıklama yok. Bilgi bankasında cevap varsa onu kullan.\n"
+        + "- Yazım hatası veya anlamsız kelime varsa nazikçe düzelt ve sor.\n"
+    )
+    llm = (
+        LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=chat_id,
+            system_message=system_prompt,
+        )
+        .with_model("anthropic", "claude-sonnet-5")
+        .with_params(max_tokens=1024)  # cap output for cost + brevity
+    )
 
     context_lines: List[str] = []
     for m in history[-20:]:
@@ -1049,6 +1376,7 @@ async def send_message(
         yield f"data: {json.dumps({'type': 'user_message', 'message': user_msg}, default=str)}\n\n"
 
         full_text_parts: List[str] = []
+        stream_usage = None
         try:
             async for event in llm.stream_message(UserMessage(text=full_prompt)):
                 if isinstance(event, TextDelta):
@@ -1056,11 +1384,39 @@ async def send_message(
                     # stream raw text so UI can accumulate; UI strips <!--UPDATE ...--> markers.
                     yield f"data: {json.dumps({'type': 'delta', 'content': event.content})}\n\n"
                 elif isinstance(event, StreamDone):
+                    stream_usage = getattr(event, "usage", None)
                     break
         except Exception as e:
             logger.exception("LLM stream error")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
             return
+
+        # Real cost accounting: Claude Sonnet 5 → $2/1M input, $10/1M output.
+        # Convert USD → TRY at USD_TRY_RATE (env, default 42).
+        if stream_usage is not None:
+            try:
+                usd_try = float(os.environ.get("USD_TRY_RATE", "42"))
+                in_tok = int(getattr(stream_usage, "input_tokens", 0) or 0)
+                out_tok = int(getattr(stream_usage, "output_tokens", 0) or 0)
+                actual_usd = (in_tok / 1_000_000.0) * 2.0 + (out_tok / 1_000_000.0) * 10.0
+                actual_try = round(actual_usd * usd_try, 4)
+                # Patch the most recent usage event (motor's update_one has no `sort` kwarg)
+                latest = await db.usage_events.find_one(
+                    {"user_id": user.user_id, "chat_id": chat_id},
+                    sort=[("created_at", -1)],
+                )
+                if latest:
+                    await db.usage_events.update_one(
+                        {"_id": latest["_id"]},
+                        {"$set": {
+                            "input_tokens": in_tok,
+                            "output_tokens": out_tok,
+                            "actual_ai_cost_usd": round(actual_usd, 6),
+                            "actual_ai_cost_try": actual_try,
+                        }},
+                    )
+            except Exception:
+                logger.exception("Failed to write token usage")
 
         assistant_text = "".join(full_text_parts)
         clean_text, update = _extract_update(assistant_text)

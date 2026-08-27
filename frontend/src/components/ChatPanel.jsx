@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Send, Paperclip, X, FileText, Loader2 } from "lucide-react";
+import { Send, Paperclip, X, FileText, Loader2, Sparkles, AlertCircle, Check } from "lucide-react";
 import { api, API } from "@/lib/api";
 import { toast } from "sonner";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 
 const fmtTRY = (n) => `₺${Number(n).toLocaleString("tr-TR", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 
@@ -17,18 +18,64 @@ function stripUpdateMarker(text) {
   return (text.slice(0, idx) + text.slice(end + 3)).trim();
 }
 
-export default function ChatPanel({ chat, messages, onStreamStart, onStreamDelta, onStreamDone, onLowBalance, costPerMessage }) {
+export default function ChatPanel({ chat, messages, onStreamStart, onStreamDelta, onStreamDone, onLowBalance, costPerMessage, onFieldsUpdated }) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [attachments, setAttachments] = useState([]);
   const [uploading, setUploading] = useState(false);
+  const [autofillLoading, setAutofillLoading] = useState(false);
+  const [autofillResult, setAutofillResult] = useState(null);
+  const [resolvedDuplicates, setResolvedDuplicates] = useState({});
   const bottomRef = useRef(null);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, streamingText]);
+
+  const runAutofill = async (ids) => {
+    if (!ids?.length) return;
+    setAutofillLoading(true);
+    try {
+      const { data } = await api.post(`/chats/${chat.chat_id}/autofill`, { attachment_ids: ids });
+      setAutofillResult(data);
+      setResolvedDuplicates({});
+      if ((data.out_of_scope || []).length > 0) {
+        toast.warning(`${data.out_of_scope.length} belge kapsam dışı`, { description: data.out_of_scope[0]?.reason });
+      }
+      if (Object.keys(data.fields || {}).length === 0 && (data.duplicates || []).length === 0) {
+        toast.info("Belgelerden alan çıkarılamadı");
+      }
+    } catch (e) {
+      const detail = e?.response?.data?.detail;
+      if (typeof detail === "object" && detail?.error === "insufficient_balance") {
+        onLowBalance?.();
+      } else {
+        toast.error(typeof detail === "string" ? detail : "Analiz başarısız");
+      }
+    } finally {
+      setAutofillLoading(false);
+    }
+  };
+
+  const acceptAutofill = async () => {
+    if (!autofillResult) return;
+    const merged = { ...(autofillResult.fields || {}) };
+    // Include resolved duplicate choices
+    for (const [key, value] of Object.entries(resolvedDuplicates)) {
+      merged[key] = value;
+    }
+    try {
+      await api.patch(`/chats/${chat.chat_id}/fields`, { fields: merged });
+      toast.success(`${Object.keys(merged).length} alan dolduruldu`, { description: `Ücret: ₺${autofillResult.cost_try}` });
+      onFieldsUpdated?.();
+      setAttachments([]);
+      setAutofillResult(null);
+    } catch {
+      toast.error("Alanlar kaydedilemedi");
+    }
+  };
 
   const handleUpload = async (e) => {
     const files = Array.from(e.target.files || []);
@@ -155,16 +202,29 @@ export default function ChatPanel({ chat, messages, onStreamStart, onStreamDelta
       </div>
 
       {attachments.length > 0 && (
-        <div className="border-t border-zinc-200 px-6 py-3 bg-zinc-50 flex gap-2 flex-wrap">
-          {attachments.map((a) => (
-            <div key={a.upload_id} className="flex items-center gap-2 bg-white border border-zinc-200 rounded-md px-3 py-1.5 text-sm">
-              <FileText className="w-3.5 h-3.5 text-zinc-500" />
-              <span className="text-zinc-800 max-w-[200px] truncate">{a.filename}</span>
-              <button onClick={() => removeAttachment(a.upload_id)} className="text-zinc-400 hover:text-zinc-950">
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          ))}
+        <div className="border-t border-zinc-200 px-6 py-3 bg-zinc-50 space-y-2">
+          <div className="flex gap-2 flex-wrap">
+            {attachments.map((a) => (
+              <div key={a.upload_id} className="flex items-center gap-2 bg-white border border-zinc-200 rounded-md px-3 py-1.5 text-sm" data-testid={`attachment-${a.upload_id}`}>
+                <FileText className="w-3.5 h-3.5 text-zinc-500" />
+                <span className="text-zinc-800 max-w-[200px] truncate">{a.filename}</span>
+                <button onClick={() => removeAttachment(a.upload_id)} className="text-zinc-400 hover:text-zinc-950">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+          {chat.mode === "report" && attachments.some(a => /pdf|image\//i.test(a.content_type || "")) && (
+            <button
+              data-testid="autofill-btn"
+              onClick={() => runAutofill(attachments.filter(a => /pdf|image\//i.test(a.content_type || "")).map(a => a.upload_id))}
+              disabled={autofillLoading}
+              className="text-xs bg-[var(--brand-navy)] text-white px-3 py-1.5 rounded-md hover:opacity-90 disabled:opacity-50 flex items-center gap-1.5"
+            >
+              {autofillLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+              {autofillLoading ? "Analiz ediliyor..." : "Belgelerden Otomatik Doldur"}
+            </button>
+          )}
         </div>
       )}
 
@@ -218,6 +278,92 @@ export default function ChatPanel({ chat, messages, onStreamStart, onStreamDelta
           </div>
         </div>
       </div>
+
+      {/* Autofill result dialog */}
+      <Dialog open={!!autofillResult} onOpenChange={(v) => { if (!v) setAutofillResult(null); }}>
+        <DialogContent className="max-w-2xl" data-testid="autofill-dialog">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-[var(--brand-gold-2)]" />
+              Otomatik Doldurma Sonuçları
+            </DialogTitle>
+          </DialogHeader>
+          {autofillResult && (
+            <div className="space-y-4 max-h-[500px] overflow-y-auto">
+              <div className="flex items-center justify-between text-xs text-zinc-500 border-b border-zinc-100 pb-2">
+                <div>{autofillResult.files_analyzed} belge analiz edildi · Alan: {Object.keys(autofillResult.fields || {}).length}</div>
+                <div className="font-mono">Maliyet: ₺{autofillResult.cost_try} · {autofillResult.tokens?.input || 0} in / {autofillResult.tokens?.output || 0} out</div>
+              </div>
+              {(autofillResult.out_of_scope || []).length > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-md p-3 space-y-1">
+                  <div className="flex items-center gap-2 text-amber-900 font-medium text-sm"><AlertCircle className="w-4 h-4" />Kapsam Dışı Belgeler</div>
+                  {autofillResult.out_of_scope.map((o, i) => (
+                    <div key={i} className="text-xs text-amber-800">
+                      <b>{o.filename}:</b> {o.reason}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {(autofillResult.duplicates || []).length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-xs font-mono uppercase tracking-widest text-zinc-500">Mükerrer Alanlar (birini seçin)</div>
+                  {autofillResult.duplicates.map((d, i) => (
+                    <div key={i} className="bg-zinc-50 border border-zinc-200 rounded-md p-3" data-testid={`duplicate-${d.field}`}>
+                      <div className="text-sm font-medium text-zinc-900 mb-2">{d.field}</div>
+                      <div className="space-y-1">
+                        {d.values.map((opt, j) => (
+                          <label key={j} className="flex items-start gap-2 text-sm cursor-pointer hover:bg-zinc-100 p-1.5 rounded">
+                            <input
+                              type="radio"
+                              name={`dup_${d.field}`}
+                              checked={resolvedDuplicates[d.field] === opt.value}
+                              onChange={() => setResolvedDuplicates((p) => ({ ...p, [d.field]: opt.value }))}
+                              className="mt-1"
+                              data-testid={`dup-opt-${d.field}-${j}`}
+                            />
+                            <div className="flex-1">
+                              <div className="text-xs text-zinc-500">{opt.source}</div>
+                              <div className="text-zinc-900">{opt.value}</div>
+                            </div>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {Object.keys(autofillResult.fields || {}).length > 0 && (
+                <div className="space-y-1">
+                  <div className="text-xs font-mono uppercase tracking-widest text-zinc-500">Çıkarılan Alanlar</div>
+                  <div className="border border-zinc-200 rounded-md divide-y divide-zinc-100">
+                    {Object.entries(autofillResult.fields).map(([k, v]) => (
+                      <div key={k} className="flex justify-between px-3 py-2 text-sm" data-testid={`field-${k}`}>
+                        <span className="font-mono text-xs text-zinc-500">{k}</span>
+                        <span className="text-zinc-900 max-w-[60%] text-right">{String(v)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {autofillResult.notes && (
+                <div className="text-xs text-zinc-500 italic border-l-2 border-zinc-300 pl-2">{autofillResult.notes}</div>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAutofillResult(null)}>Vazgeç</Button>
+            <Button
+              data-testid="autofill-accept-btn"
+              onClick={acceptAutofill}
+              className="bg-[var(--brand-navy)] text-white"
+              disabled={!autofillResult || Object.keys(autofillResult.fields || {}).length + Object.keys(resolvedDuplicates).length === 0}
+            >
+              <Check className="w-4 h-4 mr-1" />
+              Onayla ve Doldur
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

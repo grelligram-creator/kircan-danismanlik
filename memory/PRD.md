@@ -96,6 +96,27 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - **Backend routers** — `admin_routes.py` (all `/api/admin/*`), `knowledge_base.py` (all `/api/kb/*`), registered via `register_admin_routes(db, get_current_user, User)` factories to keep server.py imports acyclic.
 - **New Mongo collections** — `companies`, `company_invites`, `company_ledger`, `wallet_ledger`, `kb_docs`.
 
+## Implemented (v8 — Feb 2026 · Phase 1b + Phase 2: Token Accounting + Vision Autofill)
+
+### Phase 1b — Cost/Quality Discipline
+- **Real token counting** — `send_message` SSE now captures `StreamDone.usage.input_tokens/output_tokens` and writes them into the latest `usage_events` record along with `actual_ai_cost_usd` and `actual_ai_cost_try` (converted at env `USD_TRY_RATE`, default 42; Claude Sonnet 5 = $2/$10 per 1M tokens).
+- **Scope guard** — Every chat's system prompt now ends with a discipline block: "Sadece gayrimenkul değerleme kapsamı, kapsam dışı sorulara 'Bu konu KırCan Report AI kapsamı dışında' der ve kısa/öz yanıt verir."
+- **Output cap** — `max_tokens=1024` applied via `with_params()` on every SSE chat.
+
+### Phase 2 — Vision-based Autofill
+- **`POST /api/chats/{id}/autofill`** — Extracts template field values from PDF/JPG/PNG/WebP/TIFF attachments in one Claude Sonnet 5 call.
+  - Images: normalized to PNG via PIL, sent as `ImageContent(image_base64=...)` (native Claude Vision).
+  - PDFs: text extracted via `pypdf` (already a dep) and appended as inline document blocks — no PDF renderer required.
+  - Returns `{fields, duplicates, out_of_scope, notes, tokens, cost_try, wallet_balance, files_analyzed}`.
+- **`PATCH /api/chats/{id}/fields`** — Merges accepted autofill values (and user overrides) into `chat.fields`.
+- **Token-proportional wallet deduction** — 5 TL reserved up front; actual cost computed from `StreamDone.usage` (Claude Sonnet 5 pricing × USD/TRY × 1.30 Vision markup, ≥1 TL floor). Delta refunded to wallet after the call. Extra deduction blocked if it would go negative.
+- **Safeguards** — MAX_ATTACHMENTS=10 cap; corrupted images skipped with logger warning; temp files cleaned via `_cleanup_tmp()` on every success/failure branch (`shutil.rmtree`); 400 status (not 502) for LLM failures so JSON body reaches the client.
+- **Frontend** — ChatPanel `"Belgelerden Otomatik Doldur"` button with `data-testid="autofill-btn"`; results dialog with duplicate resolver, out-of-scope warnings, per-field preview, cost display. Data-testids: `autofill-dialog`, `duplicate-{field}`, `dup-opt-{field}-{idx}`, `field-{key}`, `autofill-accept-btn`.
+
+### Test Coverage
+- **87 tests pass**: 28 new Phase 2 (Vision multimodal, PDF text path, MAX_ATTACHMENTS, negative-balance guard, temp cleanup, 400-not-502, wallet reconciliation) + 45 RBAC + 14 invite baseurl.
+- Real Claude Vision calls verified: 8 konut fields extracted from synthetic tapu image and PDF.
+
 ## Implemented (v7 — Feb 2026 · Phase 1a: Object Storage + Preview Speed)
 - **Emergent Object Storage** — All uploads (`/api/uploads`, `/api/chats/{id}/image`, `/api/kb/upload`) now persist to Object Storage instead of pod-local disk. Legacy pod-local files still readable (graceful fallback). New helpers: `storage_utils.py`, `_resolve_image_paths`, `_ensure_local_template`. Startup event mints a shared `storage_key` once.
 - **Template preview cache** — `GET /user_templates/{tid}/preview` now caches rendered HTML by hash(template + values + images + tables). Bounded LRU (200 entries). Repeated same-fields fetches return instantly, no mammoth reparse.

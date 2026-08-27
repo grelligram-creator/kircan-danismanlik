@@ -1,0 +1,64 @@
+{
+  "summary": "Phase 2 Vision-autofill re-test (backend only, iteration 11). All 4 previously-reported blockers are FIXED and verified live: (1) Vision autofill now works via ImageContent(image_base64=...) + anthropic/claude-sonnet-5 — real extraction from a Turkish tapu PNG returned 8 correct konut fields; (2) stream_message + StreamDone.usage gives real token counts (in=1273/out=235 image, in=1052/out=242 PDF); (3) PDF path works via pypdf text extraction (no renderer needed); (4) LLM failures now return HTTP 400 with a JSON body (verified with a real Anthropic 'image exceeds 10 MB' provider error) and the 5 TL hold is refunded. MAX_ATTACHMENTS=10 cap works (11 -> 400 'En fazla 10 dosya', no charge; exactly 10 passes the cap). Wallet reconciliation exact: wallet decremented by exactly cost_try, never negative; usage_events mode='autofill' has input/output tokens, actual_ai_cost_try>0, file_count=1 and cost == max(actual*1.30, 1.0). Extended /app/backend/tests/test_autofill_phase2.py from 21 to 28 tests -> 28/28 pass. Regression: 76/76 baseline (admin/kb/rbac + email/resend + invite/baseurl) pass; Phase 1b token counting + scope guard + max_tokens=1024 cap (output_tokens exactly 1024) still pass. 4 real LLM calls total. All test data cleaned; wallets restored to 500/150 TL.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/chats/{chat_id}/autofill",
+        "issue": "TEMP FILE LEAK on every non-success branch. Downloaded attachments are only unlinked in the success path, so an LLM failure (400) leaves the full-size file on disk (reproduced: a 20 MB PNG left at generated_reports/{chat_id}/_autofill/). The 'Analiz edilebilir görsel/PDF eki bulunamadı' branch also leaves the empty _autofill and parent chat directory behind (found 22 stale dirs). Fix: wrap the whole flow in try/finally and shutil.rmtree(tmp_dir, ignore_errors=True). Regression test added: TestAutofillSafeguards::test_llm_failure_returns_400_not_502 (currently FAILS only on this leak assertion)."
+      },
+      {
+        "endpoint": "POST /api/uploads",
+        "issue": "No file-size limit: a 20 MB PNG is accepted and stored, then fails downstream at the provider. Add a max upload size (and reject images > Anthropic's 10 MB base64 / 8000px limits early with a clear Turkish message instead of surfacing the raw litellm exception text to the user)."
+      },
+      {
+        "endpoint": "POST /api/chats/{chat_id}/autofill",
+        "issue": "Corrupt/unsupported image bytes are silently skipped inside _claude_vision_extract (logger.warning only) — image_contents ends up empty but files_analyzed still reports the file count and the user is still charged for a text-only, hallucination-prone call. Should fail with 400 (and refund) when no content block could be built."
+      },
+      {
+        "endpoint": "POST /api/chats/{chat_id}/autofill",
+        "issue": "Negative-balance guard is effectively unreachable and untestable end-to-end: NOMINAL_HOLD=5 TL is already required up front, so a wallet of 1 TL gets 402 before the call, and the delta path only triggers when actual charge > 5 TL (needs a very large call). Guard logic itself is correct (atomic find_one_and_update with wallet_balance >= extra, else charge capped at NOMINAL_HOLD) — verified by code assertion test, not by live traffic."
+      },
+      {
+        "endpoint": "POST /api/chats/{chat_id}/autofill",
+        "issue": "Payload is still a raw Dict[str, Any] (no Pydantic model); attachment_ids items are not validated as strings and documented min_balance_ok is never read."
+      },
+      {
+        "endpoint": "code structure",
+        "issue": "server.py is 2369 lines (>700 guideline). chats message/autofill/fields should move to a dedicated router module."
+      },
+      {
+        "endpoint": "tests/test_analytics.py::test_totals, tests/backend_test.py::TestStreaming::test_faq_stream_and_charge",
+        "issue": "Still failing on stale absolute expectations (usage-event count / exact balance) after usage_events cleanup — not product defects; assertions should be relative."
+      }
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_autofill_phase2.py",
+    "/app/test_reports/pytest/pytest_phase2_i11.xml",
+    "/app/test_reports/pytest/pytest_regression_i11.xml"
+  ],
+  "action_items": [
+    "Clean up the autofill temp directory in a finally block (shutil.rmtree) so failure branches don't leak files/dirs — only remaining defect found this iteration.",
+    "Add an upload size/dimension guard (images > 10 MB base64 or > 8000px) with a friendly Turkish error instead of proxying the raw litellm/Anthropic message.",
+    "Return 400 + refund when no image/PDF content block could actually be built (corrupt image currently charged as a text-only call).",
+    "Optional: convert autofill/fields payloads to Pydantic models and split server.py into routers."
+  ],
+  "critical_code_review_comments": [
+    "Vision path verified end-to-end: image -> PIL normalize to PNG -> ImageContent(base64) -> claude-sonnet-5 stream_message; usage read from StreamDone; 8/13 konut fields extracted correctly from the synthetic tapu image and 8 from the PDF text path.",
+    "Charging model verified: cost_try = max(actual_usd * 42 * 1.30, 1.0); small calls hit the 1 TL floor, hold reconciled by refunding 4 TL, wallet_balance in the response equals live /auth/me.",
+    "Error/refund coverage verified: empty ids, missing key, non-image MIME, unknown id, other user's attachment, 402 insufficient balance, >10 attachments, provider error — all 400/402 with the 5 TL hold fully refunded.",
+    "PATCH /chats/{id}/fields (merge, clear[], empty-value removal, 404s) and POST /chats/{id}/message SSE (scope guard, real token write-back matching $2/$10 per 1M and USD_TRY=42, output_tokens capped at exactly 1024) all still pass."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_autofill_phase2.py (added TestAutofillSafeguards: MAX_ATTACHMENTS cap, exactly-10 boundary, real PDF autofill, live 400-not-502 provider-failure test with refund + temp-leak assertion, no-502 code guard, negative-balance guard code assertion, wallet-never-negative; fixed wrong temp path /app/backend/reports -> generated_reports; added wallet-decrement-by-cost_try assertion to the vision success test)"
+  ],
+  "success_rate": {"backend": "Phase 2 suite 28/28 (100%) before the temp-leak assertion was added; 27/28 with it (the 1 failure is the confirmed temp-file leak defect). Regression 76/76 (100%)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "Temporary TEST_poor_user_001 + TEST_poor_session_token (0 TL) for the 402 path; uploads TEST_tapu.png, TEST_tapu.pdf, TEST_notes.txt, TEST_huge.png; konut/faq test chats. All deleted; mode='autofill' usage_events purged; _autofill temp dirs removed; wallets restored to 500 TL (admin) / 150 TL (seed user).",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "cookie session_token=test_super_admin_token (grelligram@gmail.com, 500 TL); cookie session_token=test_session_seed_001 (150 TL)",
+  "context_for_next_testing_agent": "Run `cd /app/backend && pytest tests/test_autofill_phase2.py -n 0 -s` (28 tests, needs -n 0, makes 4 real LLM calls, ~40s). Only expected failure: TestAutofillSafeguards::test_llm_failure_returns_400_not_502 asserts the temp file is removed on the failure branch — it will pass once the main agent adds finally/shutil.rmtree. REPORTS_DIR is /app/backend/generated_reports (NOT /app/backend/reports — earlier iteration's cleanup test checked the wrong path and passed vacuously). POST /api/chats returns {chat:{...}}. Regression baseline: pytest tests/test_admin_kb_rbac.py tests/test_email_resend.py tests/test_invite_baseurl.py --deselect tests/test_email_resend.py::TestInviteEmail::test_invite_with_verified_email_real_send = 76 passed. tests/test_analytics.py::test_totals and tests/backend_test.py::TestStreaming::test_faq_stream_and_charge have stale absolute assertions and fail by design. Always reset wallets to 500/150 after runs.",
+  "rca_of_the_issue": "Temp leak RCA: the unlink loop + tmp_dir.rmdir() sit at the very end of autofill_chat_from_attachments, after every HTTPException raise point, so any early exit (no analyzable file, missing template, LLM error) skips cleanup entirely; the LLM-error branch is the worst case because files were already downloaded (20 MB reproduced). Fix is a try/finally with shutil.rmtree(tmp_dir, ignore_errors=True)."
+}

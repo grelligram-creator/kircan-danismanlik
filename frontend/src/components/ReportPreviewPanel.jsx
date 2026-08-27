@@ -14,8 +14,11 @@ export default function ReportPreviewPanel({ chat }) {
   const [uploadingImageKey, setUploadingImageKey] = useState(null);
   const [grammarLoading, setGrammarLoading] = useState(false);
   const [grammarResult, setGrammarResult] = useState(null);
+  const [appliedIdx, setAppliedIdx] = useState(new Set());
+  const [applyingIdx, setApplyingIdx] = useState(null);
   const fileRef = useRef(null);
   const pendingKeyRef = useRef(null);
+  const previewReqRef = useRef(0);
 
   const runGrammarCheck = async () => {
     if (!chat?.chat_id) return;
@@ -37,7 +40,40 @@ export default function ReportPreviewPanel({ chat }) {
       setGrammarLoading(false);
     }
   };
-  const previewReqRef = useRef(0);
+
+  const applySuggestion = async (idx, s) => {
+    if (!chat?.chat_id || !s?.field || !s?.corrected) return;
+    setApplyingIdx(idx);
+    try {
+      await api.patch(`/chats/${chat.chat_id}/fields`, { fields: { [s.field]: s.corrected } });
+      setAppliedIdx((prev) => { const n = new Set(prev); n.add(idx); return n; });
+      loadCustomPreview();
+      toast.success("Alan güncellendi");
+    } catch {
+      toast.error("Uygulanamadı");
+    } finally {
+      setApplyingIdx(null);
+    }
+  };
+
+  const applyAllSuggestions = async () => {
+    if (!grammarResult?.suggestions?.length) return;
+    const merged = {};
+    (grammarResult.suggestions || []).forEach((s, i) => {
+      if (!appliedIdx.has(i) && s.field && s.corrected) merged[s.field] = s.corrected;
+    });
+    if (!Object.keys(merged).length) return;
+    try {
+      await api.patch(`/chats/${chat.chat_id}/fields`, { fields: merged });
+      const all = new Set(appliedIdx);
+      (grammarResult.suggestions || []).forEach((s, i) => { if (s.field && s.corrected) all.add(i); });
+      setAppliedIdx(all);
+      loadCustomPreview();
+      toast.success(`${Object.keys(merged).length} öneri uygulandı`);
+    } catch {
+      toast.error("Uygulanamadı");
+    }
+  };
 
   const loadCustomPreview = useCallback(async () => {
     if (!chat?.user_template_id) return;
@@ -286,19 +322,52 @@ export default function ReportPreviewPanel({ chat }) {
                   Raporda imla veya anlatım hatası bulunamadı
                 </div>
               ) : (
-                (grammarResult.suggestions || []).map((s, i) => (
-                  <div key={i} className="border border-zinc-200 rounded-md p-3 space-y-2" data-testid={`grammar-item-${i}`}>
-                    <div className="text-xs font-mono uppercase text-zinc-500">{s.field}</div>
-                    <div className="text-xs bg-red-50 border-l-2 border-red-300 p-2 whitespace-pre-wrap"><b>Mevcut:</b> {s.original}</div>
-                    <div className="text-xs bg-emerald-50 border-l-2 border-emerald-400 p-2 whitespace-pre-wrap"><b>Öneri:</b> {s.corrected}</div>
-                    {s.reason && <div className="text-xs text-zinc-500 italic flex items-start gap-1"><AlertTriangle className="w-3 h-3 mt-0.5" />{s.reason}</div>}
-                  </div>
-                ))
+                (grammarResult.suggestions || []).map((s, i) => {
+                  const applied = appliedIdx.has(i);
+                  const applying = applyingIdx === i;
+                  return (
+                    <div key={i} className={`border rounded-md p-3 space-y-2 ${applied ? "border-emerald-300 bg-emerald-50/40" : "border-zinc-200"}`} data-testid={`grammar-item-${i}`}>
+                      <div className="flex items-center justify-between">
+                        <div className="text-xs font-mono uppercase text-zinc-500">{s.field}</div>
+                        {applied ? (
+                          <div className="flex items-center gap-1 text-emerald-700 text-xs font-medium">
+                            <CheckCircle2 className="w-3.5 h-3.5" /> Uygulandı
+                          </div>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => applySuggestion(i, s)}
+                            disabled={applying || !s.corrected}
+                            data-testid={`grammar-apply-${i}`}
+                            className="h-7 text-xs"
+                          >
+                            {applying ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <CheckCircle2 className="w-3 h-3 mr-1" />}
+                            Uygula
+                          </Button>
+                        )}
+                      </div>
+                      <div className="text-xs bg-red-50 border-l-2 border-red-300 p-2 whitespace-pre-wrap"><b>Mevcut:</b> {s.original}</div>
+                      <div className="text-xs bg-emerald-50 border-l-2 border-emerald-400 p-2 whitespace-pre-wrap"><b>Öneri:</b> {s.corrected}</div>
+                      {s.reason && <div className="text-xs text-zinc-500 italic flex items-start gap-1"><AlertTriangle className="w-3 h-3 mt-0.5" />{s.reason}</div>}
+                    </div>
+                  );
+                })
               )}
             </div>
           )}
           <DialogFooter>
-            <Button onClick={() => setGrammarResult(null)} className="bg-[var(--brand-navy)] text-white">Kapat</Button>
+            {(grammarResult?.suggestions?.length || 0) > 0 && (
+              <Button
+                variant="outline"
+                onClick={applyAllSuggestions}
+                data-testid="grammar-apply-all-btn"
+                disabled={(grammarResult?.suggestions || []).every((_, i) => appliedIdx.has(i))}
+              >
+                Tümünü Uygula
+              </Button>
+            )}
+            <Button onClick={() => { setGrammarResult(null); setAppliedIdx(new Set()); }} className="bg-[var(--brand-navy)] text-white">Kapat</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -386,15 +455,42 @@ function TableFieldChip({ field, rows, chatId, onSaved }) {
   useEffect(() => { setLocalRows(rows); }, [rows]);
 
   const cols = field.columns || [];
+  const [colWidths, setColWidths] = useState({});
+  useEffect(() => {
+    // Load column widths from special __widths__ row if present
+    const meta = (rows || []).find((r) => r && r.__widths__);
+    setColWidths(meta?.__widths__ || {});
+  }, [rows]);
+
   const addRow = () => setLocalRows((prev) => [...prev, Object.fromEntries(cols.map((c) => [c.key, ""]))]);
-  const removeRow = (i) => setLocalRows((prev) => prev.filter((_, idx) => idx !== i));
-  const updateCell = (i, k, v) => setLocalRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, [k]: v } : r)));
+  // Data-index-aware operations (skip __widths__ meta rows)
+  const _realIdx = (dataIdx) => {
+    let seen = -1;
+    for (let idx = 0; idx < localRows.length; idx++) {
+      if (localRows[idx]?.__widths__) continue;
+      seen += 1;
+      if (seen === dataIdx) return idx;
+    }
+    return -1;
+  };
+  const removeRow = (dataIdx) => {
+    const real = _realIdx(dataIdx);
+    setLocalRows((prev) => prev.filter((_, idx) => idx !== real));
+  };
+  const updateCell = (dataIdx, k, v) => {
+    const real = _realIdx(dataIdx);
+    setLocalRows((prev) => prev.map((r, idx) => (idx === real ? { ...r, [k]: v } : r)));
+  };
 
   const save = async () => {
     setSaving(true);
     try {
-      await api.patch(`/chats/${chatId}/table/${field.key}`, { rows: localRows });
-      toast.success(`${localRows.length} satır kaydedildi`);
+      // Persist column widths as a hidden meta row (backend ignores rows with __widths__ during Jinja loop rendering)
+      const cleanRows = localRows.filter((r) => !r?.__widths__);
+      const hasWidths = Object.values(colWidths || {}).some((v) => v !== "" && v != null);
+      const rowsToSave = hasWidths ? [{ __widths__: colWidths }, ...cleanRows] : cleanRows;
+      await api.patch(`/chats/${chatId}/table/${field.key}`, { rows: rowsToSave });
+      toast.success(`${cleanRows.length} satır kaydedildi`);
       await onSaved();
       setOpen(false);
     } catch {
@@ -416,11 +512,42 @@ function TableFieldChip({ field, rows, chatId, onSaved }) {
         {field.label} <span className="font-mono text-[10px] text-zinc-500">· {rows.length} satır</span>
       </button>
       {open && (
-        <div className="absolute z-20 top-full mt-1 left-0 bg-white border border-zinc-200 rounded-md shadow-lg p-3 w-[560px] max-w-[90vw]" data-testid={`table-editor-${field.key}`}>
-          <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-500 mb-2">{field.label} — {cols.length} sütun</div>
+        <div className="absolute z-20 top-full mt-1 left-0 bg-white border border-zinc-200 rounded-md shadow-lg p-3 w-[640px] max-w-[90vw]" data-testid={`table-editor-${field.key}`}>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-500">{field.label} — {cols.length} sütun</div>
+          </div>
+          {/* Column widths row (mm) */}
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <div className="w-8 text-[10px] font-mono text-zinc-400 uppercase">Gnşl</div>
+            {cols.map((c) => (
+              <Input
+                key={c.key}
+                type="number"
+                placeholder="mm"
+                min="10" max="200" step="5"
+                value={colWidths[c.key] ?? ""}
+                onChange={(e) => setColWidths((prev) => ({ ...prev, [c.key]: e.target.value }))}
+                className="text-[10px] h-7 font-mono"
+                data-testid={`table-colwidth-${field.key}-${c.key}`}
+                title={`${c.label} sütun genişliği (mm)`}
+              />
+            ))}
+            <div className="w-8" />
+            <div className="w-7" />
+          </div>
           <div className="max-h-64 overflow-y-auto space-y-1.5">
-            {localRows.map((row, i) => (
+            {localRows.filter((r) => !r?.__widths__).map((row, i) => (
               <div key={i} className="flex items-center gap-1.5">
+                <Input
+                  type="number"
+                  placeholder="mm"
+                  min="5" max="100" step="1"
+                  value={row.__height_mm__ ?? ""}
+                  onChange={(e) => updateCell(i, "__height_mm__", e.target.value)}
+                  className="text-[10px] h-8 w-8 font-mono px-1"
+                  data-testid={`table-rowheight-${field.key}-${i}`}
+                  title="Satır yüksekliği (mm)"
+                />
                 {cols.map((c) => (
                   <Input
                     key={c.key}

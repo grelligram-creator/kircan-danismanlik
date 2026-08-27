@@ -426,6 +426,10 @@ def render_docx(prepared_path: str, out_path: str, values: Dict[str, Any], image
     """
     tpl = DocxTemplate(prepared_path)
     ctx: Dict[str, Any] = dict(values or {})
+    # Strip UI-only meta rows (e.g. {"__widths__": {...}}) from any table lists — docxtpl loops would render them as blank rows otherwise.
+    for k, v in list(ctx.items()):
+        if isinstance(v, list):
+            ctx[k] = [r for r in v if not (isinstance(r, dict) and r.get("__widths__"))]
     for k, meta in (image_paths or {}).items():
         try:
             if isinstance(meta, dict):
@@ -467,7 +471,9 @@ def preview_html(prepared_path: str, values: Dict[str, Any], image_urls: Dict[st
             def build_rows(match):
                 template_tr = match.group("template")
                 out_rows: List[str] = []
-                for row_data in rows or []:
+                # Skip meta rows (e.g. {"__widths__": {...}}) — they're UI-only hints, not data.
+                data_rows = [r for r in (rows or []) if not (isinstance(r, dict) and r.get("__widths__"))]
+                for row_data in data_rows:
                     body = re.sub(
                         r"\{\{\s*r\.([a-zA-Z0-9_]+)\s*\}\}",
                         lambda m: str(row_data.get(m.group(1), "") or f'<span class="ph-empty">[{m.group(1)}]</span>'),

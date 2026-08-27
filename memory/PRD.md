@@ -96,6 +96,21 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - **Backend routers** — `admin_routes.py` (all `/api/admin/*`), `knowledge_base.py` (all `/api/kb/*`), registered via `register_admin_routes(db, get_current_user, User)` factories to keep server.py imports acyclic.
 - **New Mongo collections** — `companies`, `company_invites`, `company_ledger`, `wallet_ledger`, `kb_docs`.
 
+## Implemented (v10 — Feb 2026 · Phase 5 UI Polish + Grammar Apply)
+
+### Grammar Suggestion One-Click Apply
+- Every grammar suggestion card now has an `Uygula` button (`data-testid="grammar-apply-{i}"`) that PATCHes `chat.fields` with the corrected value and refreshes the preview.
+- Applied suggestions turn emerald + show a "Uygulandı" checkmark.
+- New `Tümünü Uygula` button in the dialog footer (`grammar-apply-all-btn`) applies every unapplied suggestion in one call.
+
+### Table Row-Height / Column-Width Editor
+- `TableFieldChip` editor now shows a top header row of column-width inputs (mm) and a per-row height input (mm) alongside each data row.
+- Column widths persist as a special hidden meta row `{"__widths__": {col_key: mm}}` at index 0 of the field's list. Row heights persist as `__height_mm__` on each row.
+- Both the docxtpl loop renderer (`render_docx`) and the mammoth HTML preview loop (`preview_html`) now skip `__widths__` meta rows so they never appear in the rendered document.
+
+### Test Coverage
+- **97 tests pass** — no regressions. UDF/Grammar/RBAC/Autofill/InviteURL all green.
+
 ## Implemented (v9 — Feb 2026 · Phase 3 + Phase 4: FAQ / Grammar / UDF)
 
 ### Phase 3 — FAQ inline creation + Grammar check

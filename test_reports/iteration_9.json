@@ -1,0 +1,36 @@
+{
+  "summary": "Lightweight backend re-verification after APP_BASE_URL was switched to the custom domain https://www.kircandanismanlik.com. POST /api/admin/invites returns join_url = https://www.kircandanismanlik.com/join/{code} (verified live: inv_a7f0aa0e0d704a) even with hostile Origin/Referer headers and an origin_url payload pointing elsewhere — env remains the single source of truth. GET /api/admin/invites returns join_url_prefix = https://www.kircandanismanlik.com/join. invite_email() HTML contains the new domain link and no preview/emergent host. Exactly ONE real Resend send to grelligram@gmail.com: email_sent=true, email_error=null, join_url on the new domain. Domain reachability curl: GET / -> 200, GET /join/inv_test -> 200. Regression: test_admin_kb_rbac.py 45/45 pass, test_email_resend.py 17/17 pass (duplicate invite real-send deselected to avoid flooding Resend). Extended test_invite_baseurl.py from 12 to 14 tests (added env-keys sanity + explicit 'no old emergent.host in join_url' assertion); it reads APP_BASE_URL from backend/.env, no hardcoded host. Total 76/76 backend tests pass. All invites created during testing were revoked; GET /api/admin/invites list is empty.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "auth (seed data)", "issue": "Seeded regular-user session token test_session_seed_001 had expires_at=2026-08-26 and was EXPIRED (today is 2026-08-27), causing 401 instead of 403 on RBAC checks. Re-seeded expiry to +30 days; consider a long-lived expiry in the seed script in /app/memory/test_credentials.md."},
+      {"endpoint": "admin_routes.py::create_invite / list_invites", "issue": "Still-open items from iteration 8: duplicated APP_BASE_URL resolution logic + inline imports (os, urllib.parse) inside handlers; no startup validation/warning if APP_BASE_URL is empty (would silently fall back to a relative '/join/{code}')."},
+      {"endpoint": "POST /api/admin/invites (role=admin)", "issue": "Still-open from iteration 8: company auto-created before the invite is not deleted when the invite is revoked, leaving orphan companies."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_invite_baseurl.py",
+    "/app/test_reports/pytest/pytest_invite_baseurl_i9.xml",
+    "/app/test_reports/pytest/pytest_invite_baseurl_i9b.xml",
+    "/app/test_reports/pytest/pytest_rbac_i9.xml",
+    "/app/test_reports/pytest/pytest_email_i9.xml"
+  ],
+  "action_items": [
+    "Update the seed script in /app/memory/test_credentials.md to set a far-future expires_at for test_session_seed_001 (it expired and produced 401s)",
+    "Optional: extract get_app_base_url(request) helper and log a startup warning if APP_BASE_URL is unset",
+    "Optional: clean up auto-created company when an admin invite is revoked"
+  ],
+  "critical_code_review_comments": [
+    "Env change is fully effective: APP_BASE_URL has highest priority in both create_invite and list_invites, so no request-derived host can leak into shared links. Old emergent.host string appears nowhere in backend code or tests.",
+    "backend/.env verified intact: MONGO_URL, DB_NAME, EMERGENT_LLM_KEY, STRIPE_API_KEY, RESEND_API_KEY, SENDER_EMAIL=onboarding@resend.dev, CORS_ORIGINS all present. All supervisor services RUNNING (backend restarted, picked up new env)."
+  ],
+  "updated_files": ["/app/backend/tests/test_invite_baseurl.py"],
+  "success_rate": {"backend": "100% (76/76: 14 invite baseurl + 45 rbac + 17 email) after re-seeding the expired user session", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "Re-seeded expiry of session test_session_seed_001 (+30d). Created 5 invites + 1 TEST_InviteCo company during the run; all invites revoked, invite list verified empty.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "cookie session_token=test_super_admin_token (grelligram@gmail.com); cookie session_token=test_session_seed_001 (re-seeded, valid 30 days)",
+  "context_for_next_testing_agent": "APP_BASE_URL=https://www.kircandanismanlik.com (live, 200). Assert against env, never hardcode. tests/test_invite_baseurl.py performs exactly 1 real Resend send to grelligram@gmail.com — do not loop; when running alongside tests/test_email_resend.py, deselect TestInviteEmail::test_invite_with_verified_email_real_send. If RBAC tests return 401 instead of 403, the seeded user session has expired — refresh expires_at in user_sessions.",
+  "rca_of_the_issue": "No product defect found. The only failure (401 vs 403 on regular-user RBAC) was an expired seeded session token in MongoDB, not a code regression; fixed by refreshing expires_at."
+}

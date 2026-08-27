@@ -53,6 +53,22 @@ class TestConfig:
     def test_app_base_url_configured(self):
         assert APP_BASE_URL, "APP_BASE_URL missing from backend/.env"
         assert APP_BASE_URL.startswith("https://")
+        # after the custom-domain switch the old emergent host must be gone
+        assert "emergent.host" not in APP_BASE_URL
+        assert "preview.emergentagent.com" not in APP_BASE_URL
+
+    def test_required_env_keys_present(self):
+        for key in ("MONGO_URL", "DB_NAME", "EMERGENT_LLM_KEY", "STRIPE_API_KEY", "RESEND_API_KEY", "SENDER_EMAIL"):
+            assert backend_env.get(key), f"{key} missing from backend/.env"
+        assert backend_env.get("SENDER_EMAIL") == "onboarding@resend.dev"
+
+    def test_no_old_host_in_join_urls(self, super_client, created_codes):
+        r = super_client.post(f"{BASE_URL}/api/admin/invites", json={"role": "user"})
+        assert r.status_code == 200, r.text
+        data = r.json()
+        created_codes.append(data["invite"]["code"])
+        assert "emergent.host" not in data["join_url"]
+        assert data["join_url"].startswith(APP_BASE_URL + "/join/")
 
 
 # --- POST /api/admin/invites ---

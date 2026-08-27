@@ -656,6 +656,27 @@ def _template_visible_to(tpl: Dict[str, Any], user: User) -> bool:
     return user.email.lower() in shared
 
 
+# In-memory cache for rendered template previews (hot path — hit every keystroke on the client).
+# Key: template_id + hash(prepared_docx_mtime + values + image_urls + table_data)
+# Cache eviction: bounded to 200 most-recent renders (LRU-ish via OrderedDict).
+from collections import OrderedDict
+import hashlib as _hashlib
+_PREVIEW_CACHE: "OrderedDict[str, str]" = OrderedDict()
+_PREVIEW_CACHE_MAX = 200
+
+
+def _preview_cache_key(tid: str, tpl_path: str, values: dict, image_urls: dict, table_data: dict) -> str:
+    try:
+        mtime = int(Path(tpl_path).stat().st_mtime)
+    except Exception:
+        mtime = 0
+    payload = json.dumps({
+        "tid": tid, "mtime": mtime,
+        "values": values, "image_urls": image_urls, "table_data": table_data,
+    }, sort_keys=True, default=str, ensure_ascii=False)
+    return _hashlib.md5(payload.encode("utf-8")).hexdigest()
+
+
 @api.get("/user_templates/{tid}/preview")
 async def user_template_preview(tid: str, chat_id: Optional[str] = None, user: User = Depends(get_current_user)):
     """Return HTML preview. If chat_id given, substitute the chat's current field values."""
@@ -679,8 +700,19 @@ async def user_template_preview(tid: str, chat_id: Optional[str] = None, user: U
                 elif isinstance(v, list):
                     table_data[k] = v
                     values.pop(k, None)
+
+    # Fast path: cached HTML for identical inputs (avoids mammoth re-parsing per keystroke)
+    ckey = _preview_cache_key(tid, t["prepared_docx_path"], values, image_urls, table_data)
+    cached = _PREVIEW_CACHE.get(ckey)
+    if cached is not None:
+        _PREVIEW_CACHE.move_to_end(ckey)
+        return {"html": cached, "fields": t.get("fields", []), "cached": True}
+
     html = preview_html(t["prepared_docx_path"], values, image_urls, table_data)
-    return {"html": html, "fields": t.get("fields", [])}
+    _PREVIEW_CACHE[ckey] = html
+    if len(_PREVIEW_CACHE) > _PREVIEW_CACHE_MAX:
+        _PREVIEW_CACHE.popitem(last=False)
+    return {"html": html, "fields": t.get("fields", []), "cached": False}
 
 
 # ============================================================
@@ -1105,22 +1137,30 @@ async def send_message(
 
 @api.post("/uploads")
 async def upload_file(file: UploadFile = File(...), user: User = Depends(get_current_user)):
+    from storage_utils import put_object, storage_path, content_type_for
     upload_id = f"up_{uuid.uuid4().hex[:12]}"
     safe_name = file.filename.replace("/", "_").replace("\\", "_")
-    path = UPLOAD_DIR / f"{upload_id}_{safe_name}"
     content = await file.read()
-    path.write_bytes(content)
+    ext = safe_name.rsplit(".", 1)[-1] if "." in safe_name else "bin"
+    obj_path = storage_path("uploads", user.user_id, ext)
+    ct = content_type_for(safe_name, file.content_type or "application/octet-stream")
+    try:
+        result = await put_object(obj_path, content, ct)
+    except Exception as e:
+        logger.exception("Upload to object storage failed")
+        raise HTTPException(status_code=500, detail=f"Dosya yüklenemedi: {e}")
     doc = {
         "upload_id": upload_id,
         "user_id": user.user_id,
         "filename": safe_name,
-        "path": str(path),
+        "storage_path": result["path"],
+        "content_type": ct,
         "size": len(content),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.uploads.insert_one(doc)
     doc.pop("_id", None)
-    doc.pop("path", None)
+    doc.pop("storage_path", None)
     return doc
 
 
@@ -1132,6 +1172,7 @@ async def chat_upload_image(
     user: User = Depends(get_current_user),
 ):
     """Attach an image to a user-template image field in the given chat."""
+    from storage_utils import put_object, storage_path, content_type_for
     chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -1143,35 +1184,39 @@ async def chat_upload_image(
 
     upload_id = f"img_{uuid.uuid4().hex[:12]}"
     safe_name = file.filename.replace("/", "_").replace("\\", "_")
-    path = UPLOAD_DIR / f"{upload_id}_{safe_name}"
     content = await file.read()
-    path.write_bytes(content)
 
     # Validate the bytes are actually a decodable image (prevents render-time 500)
     try:
+        import io
         from PIL import Image
-        with Image.open(str(path)) as im:
+        with Image.open(io.BytesIO(content)) as im:
             im.verify()
     except Exception:
-        try:
-            path.unlink()
-        except Exception:
-            pass
         raise HTTPException(status_code=400, detail="Geçerli bir görsel dosyası değil")
+
+    ext = safe_name.rsplit(".", 1)[-1] if "." in safe_name else "png"
+    obj_path = storage_path("chat_images", user.user_id, ext)
+    try:
+        result = await put_object(obj_path, content, content_type_for(safe_name, ct))
+    except Exception as e:
+        logger.exception("Image upload failed")
+        raise HTTPException(status_code=500, detail=f"Görsel yüklenemedi: {e}")
 
     preview_url = f"/api/uploads/file/{upload_id}"
 
     await db.uploads.insert_one({
         "upload_id": upload_id, "user_id": user.user_id, "filename": safe_name,
-        "path": str(path), "size": len(content), "kind": "image",
+        "storage_path": result["path"], "size": len(content), "kind": "image",
+        "content_type": content_type_for(safe_name, ct),
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
     new_fields = dict(chat.get("fields", {}))
     prev = new_fields.get(field_key) or {}
     width_mm = prev.get("width_mm", 80) if isinstance(prev, dict) else 80
     new_fields[field_key] = {
-        "__image__": True, "path": str(path), "preview_url": preview_url,
-        "filename": safe_name, "width_mm": width_mm,
+        "__image__": True, "storage_path": result["path"], "upload_id": upload_id,
+        "preview_url": preview_url, "filename": safe_name, "width_mm": width_mm,
     }
     await db.chats.update_one({"chat_id": chat_id}, {"$set": {"fields": new_fields}})
     return {"success": True, "field_key": field_key, "preview_url": preview_url, "filename": safe_name, "width_mm": width_mm}
@@ -1206,8 +1251,15 @@ async def chat_update_image(chat_id: str, field_key: str, payload: Dict[str, Any
     crop = payload.get("crop")
     if ar or crop:
         from PIL import Image
+        from storage_utils import get_object, put_object, storage_path, content_type_for
+        import io
+        # Load image bytes: prefer storage_path (new), fall back to legacy pod path
         try:
-            im = Image.open(val["path"])
+            if val.get("storage_path"):
+                img_bytes, _ct = await get_object(val["storage_path"])
+                im = Image.open(io.BytesIO(img_bytes))
+            else:
+                im = Image.open(val["path"])
             im.load()
         except Exception:
             raise HTTPException(status_code=400, detail="Görsel açılamadı")
@@ -1235,17 +1287,31 @@ async def chat_update_image(chat_id: str, field_key: str, payload: Dict[str, Any
                 new_h = int(im.width / target)
                 top = (im.height - new_h) // 2
                 im = im.crop((0, top, im.width, top + new_h))
-        # Save cropped image, overwriting the original path
+        # Save cropped image: store new object, update record (soft "rename")
         try:
-            fmt = "PNG" if val["path"].lower().endswith(".png") else "JPEG"
+            fname = val.get("filename", "image.jpg")
+            fmt = "PNG" if fname.lower().endswith(".png") else "JPEG"
             if fmt == "JPEG" and im.mode in ("RGBA", "P"):
                 im = im.convert("RGB")
-            im.save(val["path"], fmt, quality=92)
+            buf = io.BytesIO()
+            im.save(buf, fmt, quality=92)
+            buf.seek(0)
+            ext = "png" if fmt == "PNG" else "jpg"
+            new_path = storage_path("chat_images", user.user_id, ext)
+            result = await put_object(new_path, buf.getvalue(), "image/png" if fmt == "PNG" else "image/jpeg")
+            # Update uploads record to new storage_path
+            if val.get("upload_id"):
+                await db.uploads.update_one(
+                    {"upload_id": val["upload_id"]},
+                    {"$set": {"storage_path": result["path"]}},
+                )
+            val["storage_path"] = result["path"]
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Kaydedilemedi: {e}")
         # Bust cache: assign a new preview_url query param
         base = val.get("preview_url", "").split("?")[0]
         updates["preview_url"] = f"{base}?v={uuid.uuid4().hex[:6]}"
+        updates["storage_path"] = val["storage_path"]
         updates["crop_applied"] = ar or "custom"
         updates["width_px"] = im.width
         updates["height_px"] = im.height
@@ -1286,10 +1352,19 @@ async def chat_update_table(chat_id: str, field_key: str, payload: Dict[str, Any
 
 @api.get("/uploads/file/{upload_id}")
 async def serve_upload(upload_id: str, user: User = Depends(get_current_user)):
+    from storage_utils import get_object
     doc = await db.uploads.find_one({"upload_id": upload_id}, {"_id": 0})
     if not doc or doc.get("user_id") != user.user_id:
         raise HTTPException(status_code=404, detail="Not found")
-    p = Path(doc["path"])
+    # New object-storage docs
+    if doc.get("storage_path"):
+        try:
+            data, ct = await get_object(doc["storage_path"])
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=f"File missing: {e}")
+        return Response(content=data, media_type=doc.get("content_type") or ct)
+    # Legacy pod-local files (best effort — may be gone on new pods)
+    p = Path(doc.get("path", ""))
     if not p.exists():
         raise HTTPException(status_code=404, detail="File missing")
     return FileResponse(str(p), filename=doc.get("filename", p.name))
@@ -1298,6 +1373,48 @@ async def serve_upload(upload_id: str, user: User = Depends(get_current_user)):
 # ============================================================
 # Report Generation & Download
 # ============================================================
+
+async def _resolve_image_paths(values: Dict[str, Any], chat_id: str) -> Dict[str, Any]:
+    """Materialize image fields to local temp files (docxtpl needs file paths).
+
+    Handles new storage_path (Object Storage) and legacy pod-local `path` fields.
+    """
+    from storage_utils import get_object_to_file
+    out: Dict[str, Any] = {}
+    tmp_dir = REPORTS_DIR / chat_id / "_imgs"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    for k, v in values.items():
+        if not (isinstance(v, dict) and v.get("__image__")):
+            continue
+        width_mm = v.get("width_mm", 80)
+        if v.get("storage_path"):
+            ext = v.get("filename", "img.png").rsplit(".", 1)[-1].lower() or "png"
+            dest = tmp_dir / f"{k}.{ext}"
+            try:
+                await get_object_to_file(v["storage_path"], dest)
+                out[k] = {"path": str(dest), "width_mm": width_mm}
+            except Exception as e:
+                logger.warning(f"Failed to fetch image {k}: {e}")
+        elif v.get("path"):
+            out[k] = {"path": v["path"], "width_mm": width_mm}
+    return out
+
+
+async def _ensure_local_template(ut: Dict[str, Any]) -> str:
+    """Ensure the prepared docx template is available as a local file for docxtpl.
+
+    Prefers `prepared_storage_path` (Object Storage), falls back to legacy `prepared_docx_path`.
+    """
+    if ut.get("prepared_storage_path"):
+        from storage_utils import get_object_to_file
+        tpl_dir = TEMPLATES_DIR / ut["template_id"]
+        tpl_dir.mkdir(parents=True, exist_ok=True)
+        dest = tpl_dir / f"{ut['template_id']}_prepared.docx"
+        if not dest.exists():
+            await get_object_to_file(ut["prepared_storage_path"], dest)
+        return str(dest)
+    return ut["prepared_docx_path"]
+
 
 def _report_payload(chat: Dict[str, Any]) -> Dict[str, Any]:
     template = _template_by_id(chat.get("template_id", "")) if chat.get("template_id") else None
@@ -1325,18 +1442,16 @@ async def download_report(chat_id: str, fmt: str, user: User = Depends(get_curre
         if not ut or not _template_visible_to(ut, user):
             raise HTTPException(status_code=404, detail="Template not found")
         values = dict(chat.get("fields", {}))
-        # Split out image fields + table lists
-        image_paths: Dict[str, Any] = {}
-        clean_values: Dict[str, Any] = {}
-        for k, v in values.items():
-            if isinstance(v, dict) and v.get("__image__") and v.get("path"):
-                image_paths[k] = {"path": v["path"], "width_mm": v.get("width_mm", 80)}
-            else:
-                clean_values[k] = v  # lists (dynamic tables) pass through untouched — docxtpl loops them
+        image_paths: Dict[str, Any] = await _resolve_image_paths(values, chat_id)
+        clean_values: Dict[str, Any] = {
+            k: v for k, v in values.items()
+            if not (isinstance(v, dict) and v.get("__image__"))
+        }
         out_dir = REPORTS_DIR / chat_id
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"rapor_{chat['report_no'] or chat_id}.docx"
-        render_docx(ut["prepared_docx_path"], str(out_path), clean_values, image_paths)
+        tpl_path = await _ensure_local_template(ut)
+        render_docx(tpl_path, str(out_path), clean_values, image_paths)
         return FileResponse(
             str(out_path),
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1380,14 +1495,13 @@ async def email_report(chat_id: str, user: User = Depends(get_current_user)):
         if not ut or not _template_visible_to(ut, user):
             raise HTTPException(status_code=404, detail="Template not found")
         values = dict(chat.get("fields", {}))
-        image_paths: Dict[str, Any] = {}
-        clean_values: Dict[str, Any] = {}
-        for k, v in values.items():
-            if isinstance(v, dict) and v.get("__image__") and v.get("path"):
-                image_paths[k] = {"path": v["path"], "width_mm": v.get("width_mm", 80)}
-            else:
-                clean_values[k] = v
-        render_docx(ut["prepared_docx_path"], str(out_path), clean_values, image_paths)
+        image_paths = await _resolve_image_paths(values, chat_id)
+        clean_values = {
+            k: v for k, v in values.items()
+            if not (isinstance(v, dict) and v.get("__image__"))
+        }
+        tpl_path = await _ensure_local_template(ut)
+        render_docx(tpl_path, str(out_path), clean_values, image_paths)
     else:
         generate_docx(_report_payload(chat), str(out_path))
 
@@ -1875,6 +1989,7 @@ async def stripe_webhook(request: Request):
 # Wire admin + knowledge-base routers (registered post-User definition to avoid circular imports)
 from admin_routes import register_admin_routes
 from knowledge_base import register_kb_routes
+from storage_utils import init_storage
 admin_r = register_admin_routes(db, get_current_user, User)
 kb_r = register_kb_routes(db, get_current_user, User)
 app.include_router(admin_r)
@@ -1889,6 +2004,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def startup_event():
+    try:
+        init_storage()
+    except Exception as e:
+        logger.warning(f"Object storage init failed at startup: {e}")
 
 
 @app.on_event("shutdown")

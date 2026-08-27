@@ -9,21 +9,36 @@ import { useState, useEffect, useRef, useCallback } from "react";
 export default function ReportPreviewPanel({ chat }) {
   const [emailing, setEmailing] = useState(false);
   const [customPreview, setCustomPreview] = useState(null); // {html, fields}
+  const [previewError, setPreviewError] = useState(null);
   const [uploadingImageKey, setUploadingImageKey] = useState(null);
   const fileRef = useRef(null);
   const pendingKeyRef = useRef(null);
+  const previewReqRef = useRef(0);
 
   const loadCustomPreview = useCallback(async () => {
     if (!chat?.user_template_id) return;
+    const reqId = ++previewReqRef.current;
     try {
       const { data } = await api.get(`/user_templates/${chat.user_template_id}/preview`, {
         params: { chat_id: chat.chat_id },
+        timeout: 20000,
       });
+      // Guard: ignore stale responses (only apply if this is the newest in-flight request)
+      if (reqId !== previewReqRef.current) return;
       setCustomPreview(data);
-    } catch {}
+      setPreviewError(null);
+    } catch (e) {
+      if (reqId !== previewReqRef.current) return;
+      setPreviewError(e?.response?.data?.detail || "Şablon önizlemesi yüklenemedi");
+    }
   }, [chat?.user_template_id, chat?.chat_id, chat?.fields]);
 
-  useEffect(() => { loadCustomPreview(); }, [loadCustomPreview]);
+  // Debounce preview reloads by 300ms — avoids one fetch per keystroke.
+  useEffect(() => {
+    if (!chat?.user_template_id) return;
+    const t = setTimeout(() => { loadCustomPreview(); }, 300);
+    return () => clearTimeout(t);
+  }, [loadCustomPreview, chat?.user_template_id]);
 
   const download = (fmt) => {
     const url = `${API}/chats/${chat.chat_id}/download/${fmt}`;
@@ -194,7 +209,25 @@ export default function ReportPreviewPanel({ chat }) {
                 data-testid="custom-preview-html"
               />
             ) : (
-              <div className="p-10 text-zinc-400 text-sm">Şablon yükleniyor...</div>
+              <div className="p-10 text-zinc-400 text-sm">
+                {previewError ? (
+                  <div className="text-center space-y-3">
+                    <div className="text-red-600 text-xs">{previewError}</div>
+                    <button
+                      onClick={loadCustomPreview}
+                      className="text-xs text-[var(--brand-navy)] hover:underline"
+                      data-testid="preview-retry-btn"
+                    >
+                      Tekrar dene
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Şablon yükleniyor...</span>
+                  </div>
+                )}
+              </div>
             )
           ) : (
             <BuiltinPreview chat={chat} fieldsList={fieldsList} sectionsList={sectionsList} template={template} />

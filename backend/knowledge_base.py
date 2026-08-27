@@ -50,22 +50,47 @@ def register_kb_routes(db, get_current_user, User):
 
         doc_id = f"kb_{uuid.uuid4().hex[:12]}"
         safe_name = file.filename.replace("/", "_").replace("\\", "_")
-        path = KB_DIR / f"{doc_id}_{safe_name}"
         content = await file.read()
-        path.write_bytes(content)
+
+        # Persist to Object Storage (with pod-local fallback only if storage is unavailable)
+        storage_path_str = None
+        try:
+            from storage_utils import put_object, storage_path as make_storage_path, content_type_for
+            ext = safe_name.rsplit(".", 1)[-1] if "." in safe_name else "bin"
+            owner = user.company_id or "global"
+            key = make_storage_path("kb", owner, ext)
+            result = await put_object(key, content, content_type_for(safe_name))
+            storage_path_str = result["path"]
+        except Exception as e:
+            import logging as _lg
+            _lg.getLogger(__name__).warning(f"KB object storage upload failed, falling back to local: {e}")
+
+        # Write to a temp file so parsers (docx/pdf/xlsx libs) can read it — cleaned up after parsing.
+        import tempfile as _tempfile
+        with _tempfile.NamedTemporaryFile(delete=False, suffix=f"_{safe_name}", dir=str(KB_DIR)) as _tf:
+            _tf.write(content)
+            tmp_local = Path(_tf.name)
 
         try:
-            text = parse_uploaded_file(str(path))
+            text = parse_uploaded_file(str(tmp_local))
         except Exception as e:
-            path.unlink(missing_ok=True)
+            if storage_path_str:
+                tmp_local.unlink(missing_ok=True)
             raise HTTPException(status_code=500, detail=f"Dosya okunamadı: {e}")
+        finally:
+            # If we successfully stored to object storage, remove the local temp copy
+            if storage_path_str:
+                try:
+                    tmp_local.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
-        # Store trimmed text (avoid huge Mongo docs); full file kept on disk
         record = {
             "doc_id": doc_id,
             "title": title.strip() or safe_name,
             "filename": safe_name,
-            "path": str(path),
+            "storage_path": storage_path_str,
+            "path": None if storage_path_str else str(tmp_local),
             "scope": scope,
             "company_id": None if scope == "global" else user.company_id,
             "uploaded_by": user.user_id,
@@ -77,7 +102,7 @@ def register_kb_routes(db, get_current_user, User):
         }
         await db.kb_docs.insert_one(record)
         record.pop("_id", None)
-        record.pop("text_content", None)  # keep response small
+        record.pop("text_content", None)
         return {"document": record}
 
     @kb_router.get("/list")
@@ -97,10 +122,12 @@ def register_kb_routes(db, get_current_user, User):
         if not is_super_admin(user):
             if not (user.role == "admin" and d.get("company_id") == user.company_id):
                 raise HTTPException(status_code=403, detail="Yetkisiz")
-        try:
-            Path(d["path"]).unlink(missing_ok=True)
-        except Exception:
-            pass
+        # Object Storage has no delete API — soft-delete only (mark record and remove from index)
+        if d.get("path"):
+            try:
+                Path(d["path"]).unlink(missing_ok=True)
+            except Exception:
+                pass
         await db.kb_docs.delete_one({"doc_id": doc_id})
         return {"success": True}
 

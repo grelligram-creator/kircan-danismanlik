@@ -96,6 +96,11 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - **Backend routers** — `admin_routes.py` (all `/api/admin/*`), `knowledge_base.py` (all `/api/kb/*`), registered via `register_admin_routes(db, get_current_user, User)` factories to keep server.py imports acyclic.
 - **New Mongo collections** — `companies`, `company_invites`, `company_ledger`, `wallet_ledger`, `kb_docs`.
 
+## Implemented (v7 — Feb 2026 · Phase 1a: Object Storage + Preview Speed)
+- **Emergent Object Storage** — All uploads (`/api/uploads`, `/api/chats/{id}/image`, `/api/kb/upload`) now persist to Object Storage instead of pod-local disk. Legacy pod-local files still readable (graceful fallback). New helpers: `storage_utils.py`, `_resolve_image_paths`, `_ensure_local_template`. Startup event mints a shared `storage_key` once.
+- **Template preview cache** — `GET /user_templates/{tid}/preview` now caches rendered HTML by hash(template + values + images + tables). Bounded LRU (200 entries). Repeated same-fields fetches return instantly, no mammoth reparse.
+- **Preview reload polish** — Frontend debounces preview requests by 300ms and guards against stale race responses. "Şablon yükleniyor..." shows spinner + Turkish error message with a "Tekrar dene" button on failure.
+
 ## Implemented (v6 — Feb 2026 · Invite Link Base URL Fix)
 - **Bug fix — "site cannot be reached" on shared invite links**: Root cause was invite URLs being built from `window.location.origin`, which in preview mode is the preview host that external invitees cannot access.
 - **Solution**: New `APP_BASE_URL` env in `backend/.env` (set to `https://realestate-ai-flow.emergent.host`). Backend `create_invite` and `list_invites` now compute a canonical `join_url` using this env as highest priority (falls back to `origin_url` payload → Origin → Referer if unset).

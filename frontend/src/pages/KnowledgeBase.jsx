@@ -5,18 +5,25 @@ import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { ArrowLeft, Upload, FileText, Trash2, Globe, Building2, DatabaseZap } from "lucide-react";
+import { ArrowLeft, Upload, FileText, Trash2, Globe, Building2, DatabaseZap, HelpCircle, Plus } from "lucide-react";
 
 export default function KnowledgeBase() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const [tab, setTab] = useState("docs");
   const [docs, setDocs] = useState([]);
   const [file, setFile] = useState(null);
   const [title, setTitle] = useState("");
   const [scope, setScope] = useState("company");
   const [busy, setBusy] = useState(false);
+  // FAQ state
+  const [faqQ, setFaqQ] = useState("");
+  const [faqA, setFaqA] = useState("");
+  const [faqScope, setFaqScope] = useState("company");
+  const [faqBusy, setFaqBusy] = useState(false);
 
   const load = async () => {
     try {
@@ -31,10 +38,23 @@ export default function KnowledgeBase() {
       navigate("/dashboard", { replace: true });
       return;
     }
-    if (user.role === "admin") setScope("company");
-    else setScope("global");
+    if (user.role === "admin") { setScope("company"); setFaqScope("company"); }
+    else { setScope("global"); setFaqScope("global"); }
     load();
   }, [user]);
+
+  const addFaq = async () => {
+    if (!faqQ.trim() || !faqA.trim()) { toast.error("Soru ve cevap gerekli"); return; }
+    setFaqBusy(true);
+    try {
+      await api.post("/kb/faq", { question: faqQ.trim(), answer: faqA.trim(), scope: faqScope });
+      toast.success("FAQ eklendi");
+      setFaqQ(""); setFaqA("");
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Ekleme başarısız");
+    } finally { setFaqBusy(false); }
+  };
 
   if (!user || (user.role !== "admin" && user.role !== "super_admin")) return null;
 
@@ -86,6 +106,89 @@ export default function KnowledgeBase() {
       </header>
 
       <main className="max-w-5xl mx-auto px-6 py-8 space-y-6">
+        {/* Tab bar */}
+        <div className="flex gap-1 bg-zinc-100 rounded-md p-1 w-fit">
+          <button
+            data-testid="kb-tab-docs"
+            onClick={() => setTab("docs")}
+            className={`px-4 py-1.5 rounded text-sm flex items-center gap-1.5 transition-colors ${tab === "docs" ? "bg-white text-[var(--brand-navy)] shadow-sm" : "text-zinc-600"}`}
+          >
+            <FileText className="w-3.5 h-3.5" /> Dokümanlar
+          </button>
+          <button
+            data-testid="kb-tab-faq"
+            onClick={() => setTab("faq")}
+            className={`px-4 py-1.5 rounded text-sm flex items-center gap-1.5 transition-colors ${tab === "faq" ? "bg-white text-[var(--brand-navy)] shadow-sm" : "text-zinc-600"}`}
+          >
+            <HelpCircle className="w-3.5 h-3.5" /> SSS (FAQ)
+          </button>
+        </div>
+
+        {tab === "faq" && (
+          <>
+            <div className="bg-white border border-zinc-200 rounded-lg p-6">
+              <h2 className="text-base font-medium text-[var(--brand-navy)] mb-2">Yeni FAQ Ekle</h2>
+              <p className="text-xs text-zinc-500 mb-4">
+                Şirketiniz veya tüm kullanıcılar için hızlı bir Soru-Cevap girin. AI, FAQ sohbetlerinde önce bu içerikleri kullanır.
+              </p>
+              <div className="space-y-3">
+                <div>
+                  <Label>Soru</Label>
+                  <Input value={faqQ} onChange={(e) => setFaqQ(e.target.value)} placeholder="Örn: Emsal karşılaştırmasında en az kaç emsal kullanılmalı?" data-testid="faq-q-input" />
+                </div>
+                <div>
+                  <Label>Cevap</Label>
+                  <Textarea value={faqA} onChange={(e) => setFaqA(e.target.value)} rows={4} placeholder="SPK Değerleme Standartları'na göre en az 3 benzer taşınmaz kullanılır..." data-testid="faq-a-input" />
+                </div>
+                <div>
+                  <Label>Kapsam</Label>
+                  <select value={faqScope} onChange={(e) => setFaqScope(e.target.value)} className="w-full border border-zinc-300 rounded-md px-3 py-2 text-sm" data-testid="faq-scope-select">
+                    {user.role === "super_admin" && <option value="global">Global (Tüm Kullanıcılar)</option>}
+                    <option value="company">Şirket ({user.company_name || "kendi şirketiniz"})</option>
+                  </select>
+                </div>
+                <div className="flex justify-end">
+                  <Button onClick={addFaq} disabled={faqBusy || !faqQ.trim() || !faqA.trim()} className="bg-[var(--brand-navy)] text-white" data-testid="faq-add-btn">
+                    <Plus className="w-4 h-4 mr-1" /> {faqBusy ? "Ekleniyor..." : "FAQ Ekle"}
+                  </Button>
+                </div>
+              </div>
+            </div>
+            <div className="bg-white border border-zinc-200 rounded-lg overflow-hidden">
+              <div className="p-4 border-b border-zinc-200">
+                <h2 className="text-base font-medium text-[var(--brand-navy)]">Yüklü FAQ ({docs.filter(d => d.kind === "faq").length})</h2>
+              </div>
+              <div className="divide-y divide-zinc-100">
+                {docs.filter(d => d.kind === "faq").map((d) => (
+                  <div key={d.doc_id} className="p-4" data-testid={`faq-item-${d.doc_id}`}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-medium text-zinc-900">{d.question || d.title}</div>
+                        <div className="text-xs text-zinc-600 mt-1 whitespace-pre-wrap">{d.answer || d.text_preview}</div>
+                      </div>
+                      <div className="flex-shrink-0 flex items-center gap-2">
+                        {d.scope === "global" ? (
+                          <Badge className="bg-[var(--brand-gold)]/20 text-[var(--brand-navy)] hover:bg-[var(--brand-gold)]/20 text-[10px]"><Globe className="w-3 h-3 mr-1" />GLOBAL</Badge>
+                        ) : (
+                          <Badge className="bg-blue-100 text-blue-800 hover:bg-blue-100 text-[10px]"><Building2 className="w-3 h-3 mr-1" />ŞİRKET</Badge>
+                        )}
+                        <button onClick={() => remove(d.doc_id)} className="text-red-600 hover:text-red-700" data-testid={`faq-delete-${d.doc_id}`}>
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {docs.filter(d => d.kind === "faq").length === 0 && (
+                  <div className="p-8 text-center text-zinc-500 text-sm">Henüz FAQ eklenmemiş</div>
+                )}
+              </div>
+            </div>
+          </>
+        )}
+
+        {tab === "docs" && (
+          <>
         <div className="bg-white border border-zinc-200 rounded-lg p-6">
           <h2 className="text-base font-medium text-[var(--brand-navy)] mb-2">Yeni Doküman Yükle</h2>
           <p className="text-xs text-zinc-500 mb-4">
@@ -143,7 +246,7 @@ export default function KnowledgeBase() {
             <p className="text-xs text-zinc-500">{docs.length} doküman</p>
           </div>
           <div className="divide-y divide-zinc-100">
-            {docs.map((d) => (
+            {docs.filter(d => d.kind !== "faq").map((d) => (
               <div key={d.doc_id} className="flex items-center gap-3 p-4" data-testid={`kb-doc-${d.doc_id}`}>
                 <FileText className="w-5 h-5 text-zinc-400 flex-shrink-0" />
                 <div className="flex-1 min-w-0">
@@ -171,11 +274,13 @@ export default function KnowledgeBase() {
                 </div>
               </div>
             ))}
-            {docs.length === 0 && (
+            {docs.filter(d => d.kind !== "faq").length === 0 && (
               <div className="p-8 text-center text-zinc-500 text-sm">Henüz doküman yok</div>
             )}
           </div>
         </div>
+          </>
+        )}
       </main>
     </div>
   );

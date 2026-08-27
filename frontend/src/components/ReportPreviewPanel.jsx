@@ -1,18 +1,42 @@
 import { Button } from "@/components/ui/button";
-import { Download, Mail, FileText, CheckCircle2, Loader2, Upload, Table as TableIcon, Plus, X } from "lucide-react";
+import { Download, Mail, FileText, CheckCircle2, Loader2, Upload, Table as TableIcon, Plus, X, Wand2, AlertTriangle } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
 import { api, API } from "@/lib/api";
 import { toast } from "sonner";
 import { useState, useEffect, useRef, useCallback } from "react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 
 export default function ReportPreviewPanel({ chat }) {
   const [emailing, setEmailing] = useState(false);
   const [customPreview, setCustomPreview] = useState(null); // {html, fields}
   const [previewError, setPreviewError] = useState(null);
   const [uploadingImageKey, setUploadingImageKey] = useState(null);
+  const [grammarLoading, setGrammarLoading] = useState(false);
+  const [grammarResult, setGrammarResult] = useState(null);
   const fileRef = useRef(null);
   const pendingKeyRef = useRef(null);
+
+  const runGrammarCheck = async () => {
+    if (!chat?.chat_id) return;
+    setGrammarLoading(true);
+    try {
+      const { data } = await api.post(`/chats/${chat.chat_id}/grammar-check`);
+      setGrammarResult(data);
+      if ((data.suggestions || []).length === 0) {
+        toast.success("Rapor metinlerinde imla/anlatım hatası bulunamadı");
+      }
+    } catch (e) {
+      const detail = e?.response?.data?.detail;
+      if (typeof detail === "object" && detail?.error === "insufficient_balance") {
+        toast.error(`Yetersiz bakiye — gerekli: ₺${detail.required}`);
+      } else {
+        toast.error(typeof detail === "string" ? detail : "Kontrol başarısız");
+      }
+    } finally {
+      setGrammarLoading(false);
+    }
+  };
   const previewReqRef = useRef(0);
 
   const loadCustomPreview = useCallback(async () => {
@@ -151,6 +175,13 @@ export default function ReportPreviewPanel({ chat }) {
           <Button data-testid="download-docx-btn" variant="outline" size="sm" onClick={() => download("docx")} disabled={!hasContent}>
             <Download className="w-3.5 h-3.5 mr-1.5" /> DOCX
           </Button>
+          <Button data-testid="download-udf-btn" variant="outline" size="sm" onClick={() => download("udf")} disabled={!hasContent} title="UYAP UDF formatı — mahkeme başvuruları için">
+            <Download className="w-3.5 h-3.5 mr-1.5" /> UDF
+          </Button>
+          <Button data-testid="grammar-check-btn" variant="outline" size="sm" onClick={runGrammarCheck} disabled={!hasContent || grammarLoading} title="Rapor metinlerini yazım/anlatım açısından kontrol et">
+            {grammarLoading ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5 mr-1.5" />}
+            İmla
+          </Button>
           <Button data-testid="email-report-btn" size="sm" className="bg-zinc-950 text-white hover:bg-zinc-800" onClick={sendEmail} disabled={!hasContent || emailing}>
             {emailing ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Mail className="w-3.5 h-3.5 mr-1.5" />}
             E-posta
@@ -234,6 +265,43 @@ export default function ReportPreviewPanel({ chat }) {
           )}
         </div>
       </div>
+
+      {/* Grammar check result dialog — belongs to ReportPreviewPanel so grammarResult/setGrammarResult are in scope */}
+      <Dialog open={!!grammarResult} onOpenChange={(v) => { if (!v) setGrammarResult(null); }}>
+        <DialogContent className="max-w-2xl" data-testid="grammar-dialog">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Wand2 className="w-4 h-4 text-[var(--brand-gold-2)]" />
+              İmla ve Anlatım Önerileri
+            </DialogTitle>
+          </DialogHeader>
+          {grammarResult && (
+            <div className="space-y-3 max-h-[500px] overflow-y-auto">
+              <div className="text-xs text-zinc-500 border-b border-zinc-100 pb-2 font-mono">
+                {(grammarResult.suggestions || []).length} öneri · Maliyet: ₺{grammarResult.cost_try} · {grammarResult.tokens?.input || 0} in / {grammarResult.tokens?.output || 0} out
+              </div>
+              {(grammarResult.suggestions || []).length === 0 ? (
+                <div className="text-center text-zinc-500 py-6 flex flex-col items-center gap-2">
+                  <CheckCircle2 className="w-8 h-8 text-emerald-500" />
+                  Raporda imla veya anlatım hatası bulunamadı
+                </div>
+              ) : (
+                (grammarResult.suggestions || []).map((s, i) => (
+                  <div key={i} className="border border-zinc-200 rounded-md p-3 space-y-2" data-testid={`grammar-item-${i}`}>
+                    <div className="text-xs font-mono uppercase text-zinc-500">{s.field}</div>
+                    <div className="text-xs bg-red-50 border-l-2 border-red-300 p-2 whitespace-pre-wrap"><b>Mevcut:</b> {s.original}</div>
+                    <div className="text-xs bg-emerald-50 border-l-2 border-emerald-400 p-2 whitespace-pre-wrap"><b>Öneri:</b> {s.corrected}</div>
+                    {s.reason && <div className="text-xs text-zinc-500 italic flex items-start gap-1"><AlertTriangle className="w-3 h-3 mt-0.5" />{s.reason}</div>}
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button onClick={() => setGrammarResult(null)} className="bg-[var(--brand-navy)] text-white">Kapat</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

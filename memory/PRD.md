@@ -96,6 +96,32 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - **Backend routers** — `admin_routes.py` (all `/api/admin/*`), `knowledge_base.py` (all `/api/kb/*`), registered via `register_admin_routes(db, get_current_user, User)` factories to keep server.py imports acyclic.
 - **New Mongo collections** — `companies`, `company_invites`, `company_ledger`, `wallet_ledger`, `kb_docs`.
 
+## Implemented (v9 — Feb 2026 · Phase 3 + Phase 4: FAQ / Grammar / UDF)
+
+### Phase 3 — FAQ inline creation + Grammar check
+- **`POST /api/kb/faq`** — Admin/super admin can add a Question/Answer directly (no file upload). Stored in `kb_docs` with `kind: "faq"`, indexed alongside document KB entries. Automatically injected into every Claude system prompt via `get_kb_context()`. Global scope requires super_admin.
+- **Frontend KB page** — New tab bar (`Dokümanlar` / `SSS (FAQ)`) with `data-testid` `kb-tab-docs` / `kb-tab-faq`. FAQ tab has inline form (`faq-q-input`, `faq-a-input`, `faq-scope-select`, `faq-add-btn`) and list view with per-item delete.
+- **`POST /api/chats/{id}/grammar-check`** — One-shot Claude Sonnet 5 review of field values + section texts. Returns `{suggestions: [{field, original, corrected, reason}], tokens, cost_try, wallet_balance}`. Token-proportional pricing (3 TL hold, ≥0.5 TL floor, 30% markup). Wallet negative-safe.
+- **Frontend Grammar UI** — "İmla" button in ReportPreviewPanel header (`grammar-check-btn`). Result dialog (`grammar-dialog`) with per-suggestion red/green diff cards.
+
+### Phase 4 — UDF Export for UYAP Court Submission
+- **`document_utils.generate_udf(report, output_path)`** — Produces a valid UDF file: ZIP archive containing `content.xml` with:
+  - `<template format_id="1.8">` root
+  - `<content><![CDATA[...]]></content>` — plain text body with CDATA-safe `]]>` escaping
+  - `<properties><pageFormat ... /></properties>` — A4 with 42.55pt margins
+  - `<elements resolver="hvl-oluster">` — contiguous `<paragraph>` elements with correct `startOffset`/`length` referencing char positions in the CDATA body
+  - Bold heuristic for title and all-caps section headings
+- **`GET /api/chats/{id}/download/udf`** — Downloads UDF for both built-in and user templates.
+- **Frontend** — "UDF" download button (`download-udf-btn`) added to ReportPreviewPanel next to PDF/DOCX.
+
+### Fix Regression
+- Restored missing `@api.patch("/chats/{chat_id}/fields")` decorator that had been overwritten by the grammar-check endpoint diff.
+
+### Test Coverage
+- **111 tests pass**: 24 Phase 3+4 + 28 Phase 2 Vision + 45 RBAC + 14 invite URL.
+- Real Claude grammar-check call verified (Turkish typo correction suggested).
+- UDF: valid ZIP + valid XML + contiguous paragraph offsets that sum exactly to `len(CDATA)`.
+
 ## Implemented (v8 — Feb 2026 · Phase 1b + Phase 2: Token Accounting + Vision Autofill)
 
 ### Phase 1b — Cost/Quality Discipline

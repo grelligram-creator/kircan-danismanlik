@@ -138,3 +138,84 @@ def generate_docx(report: Dict[str, Any], output_path: str) -> None:
                 doc.add_paragraph(para)
 
     doc.save(output_path)
+
+
+def generate_udf(report: Dict[str, Any], output_path: str) -> None:
+    """Generate a UYAP UDF file for court submission.
+
+    UDF (UYAP Doküman Formatı) is a ZIP archive containing content.xml — a UYAP-specific
+    XML dialect used by the Turkish courts' UYAP electronic filing system.
+    """
+    import zipfile
+    from xml.sax.saxutils import escape as xml_escape
+
+    template_name = report.get("template_name", "Değerleme Raporu")
+    report_no = report.get("report_no", "-")
+
+    # Build plain text body (used as CDATA content) + paragraph offsets (used as element index)
+    body_lines: List[str] = []
+    body_lines.append(template_name)
+    body_lines.append("")
+    body_lines.append(f"Rapor No: {report_no}      Tarih: {datetime.now().strftime('%d.%m.%Y')}")
+    body_lines.append("")
+
+    fields = report.get("fields", {})
+    if fields:
+        body_lines.append("GAYRİMENKUL BİLGİLERİ")
+        for k, v in fields.items():
+            body_lines.append(f"{k}: {v if v else '-'}")
+        body_lines.append("")
+
+    sections = report.get("sections", {})
+    for section_name, section_text in sections.items():
+        body_lines.append(section_name.upper())
+        for para in (section_text or "").split("\n"):
+            if para.strip():
+                body_lines.append(para.strip())
+        body_lines.append("")
+
+    body_text = "\n".join(body_lines)
+    # Sanitize CDATA — a ']]>' in user content would prematurely close our CDATA block
+    body_text_cdata = body_text.replace("]]>", "]]]]><![CDATA[>")
+
+    # Build elements with offsets — UYAP UDF requires paragraph elements referencing char offsets
+    elements_xml_parts: List[str] = []
+    offset = 0
+    total_lines = len(body_lines)
+    for idx, line in enumerate(body_lines):
+        # All lines except the last are terminated by "\n" in the joined string
+        length = len(line) + (1 if idx < total_lines - 1 else 0)
+        escaped = xml_escape(line)
+        # Titles (bold heuristic): all-caps lines and template_name
+        is_bold = line.isupper() and line.strip() != "" or line == template_name
+        family = "Times New Roman"
+        size = 12 if line == template_name else 10
+        elements_xml_parts.append(
+            f'<paragraph Alignment="0" LineSpacing="1.15" SpaceAbove="0" SpaceBelow="0">'
+            f'<content startOffset="{offset}" length="{length}" family="{family}" size="{size}" '
+            f'bold="{str(is_bold).lower()}" italic="false" underline="false" '
+            f'strikethrough="false" foreground="-16777216"/>'
+            f'</paragraph>'
+        )
+        offset += length
+
+    content_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<template format_id="1.8">\n'
+        f'<content><![CDATA[{body_text_cdata}]]></content>\n'
+        '<properties>\n'
+        '  <pageFormat mediaSizeName="1" leftMargin="42.55" rightMargin="42.55" '
+        'topMargin="42.55" bottomMargin="42.55" paperOrientation="1" headerFOffset="20.0" footerFOffset="20.0"/>\n'
+        '</properties>\n'
+        '<elements resolver="hvl-oluster">\n'
+        + "\n".join(elements_xml_parts) + "\n"
+        '</elements>\n'
+        '<styles>\n'
+        '  <style name="default" description="Geçerli" family="Times New Roman" size="10" '
+        'bold="false" italic="false" foreground="-16777216" bgColor="-1"/>\n'
+        '</styles>\n'
+        '</template>\n'
+    )
+
+    with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("content.xml", content_xml)

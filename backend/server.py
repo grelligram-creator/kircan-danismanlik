@@ -23,7 +23,7 @@ from emergentintegrations.payments.stripe.checkout import (
 )
 
 from templates_data import REPORT_TEMPLATES, FAQ_ITEMS
-from document_utils import parse_uploaded_file, generate_pdf, generate_docx
+from document_utils import parse_uploaded_file, generate_pdf, generate_docx, generate_udf
 from wallet_packages import WALLET_PACKAGES, get_package
 from auth_deps import SUPER_ADMIN_EMAILS, is_super_admin, is_admin_or_super
 from knowledge_base import get_kb_context
@@ -1235,6 +1235,110 @@ async def autofill_chat_from_attachments(
     }
 
 
+@api.post("/chats/{chat_id}/grammar-check")
+async def grammar_check_report(chat_id: str, user: User = Depends(get_current_user)):
+    """One-shot AI review of the report's field values + section texts.
+
+    Returns Turkish grammar/punctuation/meaning suggestions. Cost is token-proportional.
+    """
+    chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    # Gather text: field values + section prose
+    parts: List[str] = []
+    for k, v in (chat.get("fields") or {}).items():
+        if isinstance(v, str) and v.strip():
+            parts.append(f"[{k}] {v}")
+    for sec, text in (chat.get("sections") or {}).items():
+        if isinstance(text, str) and text.strip():
+            parts.append(f"[{sec}]\n{text}")
+    if not parts:
+        raise HTTPException(status_code=400, detail="Kontrol edilecek metin bulunamadı")
+
+    NOMINAL_HOLD = 3.0
+    reserved = await db.users.find_one_and_update(
+        {"user_id": user.user_id, "wallet_balance": {"$gte": NOMINAL_HOLD}},
+        {"$inc": {"wallet_balance": -NOMINAL_HOLD}},
+        return_document=True,
+    )
+    if not reserved:
+        raise HTTPException(status_code=402, detail={"error": "insufficient_balance", "required": NOMINAL_HOLD})
+
+    system = (
+        "Sen KırCan Report AI'sın — Türkçe dil bilgisi ve gayrimenkul değerleme raporu uzmanısın. "
+        "Verilen rapor metinlerinde imla, noktalama ve anlam bütünlüğü hatalarını tespit et. "
+        "Sadece JSON dön:\n"
+        '{"suggestions": [{"field": "alan_adı", "original": "...", "corrected": "...", "reason": "kısa açıklama"}]}\n'
+        "Hata yoksa boş liste dön. Kesin olmadığın öneriler için 'reason' alanına 'öneri' yaz."
+    )
+    llm = (
+        LlmChat(api_key=EMERGENT_LLM_KEY, session_id=f"grammar_{uuid.uuid4().hex[:8]}", system_message=system)
+        .with_model("anthropic", "claude-sonnet-5")
+        .with_params(max_tokens=1024)
+    )
+
+    parts_text = "\n\n".join(parts)[:12000]
+    parsed: Dict[str, Any] = {"suggestions": []}
+    in_tok = out_tok = 0
+    try:
+        text_parts: List[str] = []
+        usage = None
+        async for event in llm.stream_message(UserMessage(text=parts_text)):
+            if isinstance(event, TextDelta):
+                text_parts.append(event.content)
+            elif isinstance(event, StreamDone):
+                usage = getattr(event, "usage", None)
+                break
+        raw = "".join(text_parts).strip()
+        if raw.startswith("```"):
+            raw = raw.split("```", 2)[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip().rstrip("`").strip()
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            start = raw.find("{"); end = raw.rfind("}")
+            if start != -1 and end > start:
+                parsed = json.loads(raw[start:end + 1])
+        in_tok = int(getattr(usage, "input_tokens", 0) or 0) if usage else 0
+        out_tok = int(getattr(usage, "output_tokens", 0) or 0) if usage else 0
+    except Exception as e:
+        await db.users.update_one({"user_id": user.user_id}, {"$inc": {"wallet_balance": NOMINAL_HOLD}})
+        raise HTTPException(status_code=400, detail=f"Kontrol başarısız: {e}")
+
+    usd_try = float(os.environ.get("USD_TRY_RATE", "42"))
+    actual_usd = (in_tok / 1_000_000.0) * 2.0 + (out_tok / 1_000_000.0) * 10.0
+    charged = max(round(actual_usd * usd_try * 1.30, 2), 0.5) if in_tok else NOMINAL_HOLD
+    delta = NOMINAL_HOLD - charged
+    if delta > 0:
+        await db.users.update_one({"user_id": user.user_id}, {"$inc": {"wallet_balance": delta}})
+    elif delta < 0:
+        extra = -delta
+        ok = await db.users.find_one_and_update(
+            {"user_id": user.user_id, "wallet_balance": {"$gte": extra}},
+            {"$inc": {"wallet_balance": -extra}}, return_document=True,
+        )
+        if not ok:
+            charged = NOMINAL_HOLD
+
+    await db.usage_events.insert_one({
+        "user_id": user.user_id, "chat_id": chat_id, "mode": "grammar",
+        "cost": float(charged), "input_tokens": in_tok, "output_tokens": out_tok,
+        "actual_ai_cost_usd": round(actual_usd, 6),
+        "actual_ai_cost_try": round(actual_usd * usd_try, 4),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    latest = await db.users.find_one({"user_id": user.user_id}, {"wallet_balance": 1, "_id": 0})
+    return {
+        "suggestions": parsed.get("suggestions") or [],
+        "tokens": {"input": in_tok, "output": out_tok},
+        "cost_try": charged,
+        "wallet_balance": round(float((latest or {}).get("wallet_balance", 0)), 2),
+    }
+
+
+
 @api.patch("/chats/{chat_id}/fields")
 async def patch_chat_fields(
     chat_id: str,
@@ -1830,7 +1934,32 @@ async def download_report(chat_id: str, fmt: str, user: User = Depends(get_curre
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             filename=f"{filename_base}.docx",
         )
-    raise HTTPException(status_code=400, detail="Format must be pdf or docx")
+    if fmt == "udf":
+        # UYAP UDF format for court submission. Works for both user templates and built-in templates.
+        if chat.get("user_template_id"):
+            # Extract text from the rendered user template by treating it like a plain report:
+            # we don't need the full docxtpl render — the field values + a title are enough for UDF.
+            ut = await _get_user_template(chat["user_template_id"])
+            if not ut or not _template_visible_to(ut, user):
+                raise HTTPException(status_code=404, detail="Template not found")
+            fields_only = {}
+            for k, v in (chat.get("fields") or {}).items():
+                if isinstance(v, dict) and v.get("__image__"):
+                    continue
+                if isinstance(v, list):
+                    fields_only[k] = "; ".join(", ".join(f"{ck}: {cv}" for ck, cv in (r or {}).items()) for r in v)
+                else:
+                    fields_only[k] = v
+            payload = {
+                "template_name": ut.get("name", "Değerleme Raporu"),
+                "report_no": chat.get("report_no", "-"),
+                "fields": fields_only,
+                "sections": {},
+            }
+        out = REPORTS_DIR / f"{filename_base}.udf"
+        generate_udf(payload, str(out))
+        return FileResponse(str(out), media_type="application/octet-stream", filename=f"{filename_base}.udf")
+    raise HTTPException(status_code=400, detail="Format must be pdf, docx or udf")
 
 
 @api.post("/chats/{chat_id}/email")

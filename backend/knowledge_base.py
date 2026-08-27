@@ -131,6 +131,52 @@ def register_kb_routes(db, get_current_user, User):
         await db.kb_docs.delete_one({"doc_id": doc_id})
         return {"success": True}
 
+    @kb_router.post("/faq")
+    async def create_faq_item(payload: Dict[str, Any], user: User = Depends(get_current_user)):
+        """Add a Q&A pair directly (no file). Admin/super only.
+
+        Payload: {question, answer, scope: 'global'|'company'}
+        """
+        from auth_deps import is_admin_or_super
+        if not is_admin_or_super(user):
+            raise HTTPException(status_code=403, detail="Sadece admin ve süper admin FAQ ekleyebilir")
+        q = str(payload.get("question", "")).strip()
+        a = str(payload.get("answer", "")).strip()
+        scope = payload.get("scope", "company")
+        if not q or not a:
+            raise HTTPException(status_code=400, detail="Soru ve cevap boş olamaz")
+        if scope not in ("global", "company"):
+            raise HTTPException(status_code=400, detail="Geçersiz kapsam")
+        if scope == "global" and not is_super_admin(user):
+            raise HTTPException(status_code=403, detail="Global FAQ yalnızca süper admin ekleyebilir")
+        if scope == "company" and not user.company_id and not is_super_admin(user):
+            raise HTTPException(status_code=400, detail="Şirketiniz tanımlı değil")
+
+        doc_id = f"faq_{uuid.uuid4().hex[:12]}"
+        text_content = f"SORU: {q}\n\nCEVAP: {a}"
+        record = {
+            "doc_id": doc_id,
+            "title": q[:200],
+            "filename": None,
+            "storage_path": None,
+            "path": None,
+            "scope": scope,
+            "kind": "faq",
+            "question": q,
+            "answer": a,
+            "company_id": None if scope == "global" else user.company_id,
+            "uploaded_by": user.user_id,
+            "uploader_email": user.email,
+            "text_preview": text_content[:500],
+            "text_content": text_content,
+            "size": len(text_content.encode("utf-8")),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await db.kb_docs.insert_one(record)
+        record.pop("_id", None)
+        record.pop("text_content", None)
+        return {"item": record}
+
     return kb_router
 
 

@@ -450,7 +450,7 @@ async def _claude_vision_extract(
             system_message=system,
         )
         .with_model("anthropic", "claude-sonnet-5")
-        .with_params(max_tokens=2048)
+        .with_params(max_tokens=4096)
     )
     msg = UserMessage(text="\n".join(text_blocks), file_contents=image_contents or None)
 
@@ -934,6 +934,29 @@ def _build_system_prompt(chat: Dict[str, Any], user_tpl: Optional[Dict[str, Any]
             ensure_ascii=False, indent=2,
         )
         collected = json.dumps(chat.get("fields", {}), ensure_ascii=False, indent=2, default=str)
+        # Identify narrative fields (long-form legal/valuation paragraphs) so the AI drafts them fully
+        narrative_keywords = ("iddia", "savunma", "gerekce", "gerekçe", "değerlendirme", "degerlendirme",
+                              "sonuc", "sonuç", "beyan", "talep", "aciklama", "açıklama", "karar",
+                              "tespit", "gözlem", "gozlem", "kıymet takdiri", "kiymet takdiri",
+                              "hukuki", "davaci", "davacı", "davali", "davalı", "bilirkişi", "bilirkisi")
+        narrative_fields = []
+        for f in user_tpl["fields"]:
+            key_l = (f.get("key") or "").lower()
+            lbl_l = (f.get("label") or "").lower()
+            hint_l = (f.get("hint") or "").lower()
+            ftype = f.get("type")
+            if ftype == "textarea" or any(kw in key_l or kw in lbl_l or kw in hint_l for kw in narrative_keywords):
+                narrative_fields.append(f.get("key"))
+        narrative_hint = (
+            f"\n\n## Anlatı (uzun paragraf) alanları\n"
+            f"Bu alanlar için 1-2 cümlelik cevap YETERSİZDİR. Her biri için gayrimenkul değerleme uzmanı "
+            f"gibi 3-8 cümlelik, gerekçeli, hukuki dille yazılmış TAM PARAGRAF üret. Ekli belgelerden "
+            f"davacı iddialarını, savunmaları, mahkeme kararlarını, teknik tespitleri ve bilirkişi "
+            f"değerlendirmelerini sentezleyerek özetle. Kaynak belgede eksik olan kritik unsurları "
+            f"kullanıcıya açıkça sor.\n"
+            f"Narratif alan anahtarları: {narrative_fields}"
+            if narrative_fields else ""
+        )
         return f"""{brand_intro}
 
 Kullanıcının **{user_tpl['name']}** şablonunu doldurmasına yardım ediyorsun.
@@ -942,21 +965,26 @@ Kullanıcının **{user_tpl['name']}** şablonunu doldurmasına yardım ediyorsu
 1. Aşağıdaki alanları SIRAYLA, tek tek kullanıcıya sor ve topla.
 2. `image` tipindeki alanlar için kullanıcıdan üstteki "Görsel Slotları" barından fotoğraf yüklemesini iste (değer olarak "__pending__" kaydet).
 3. `table` tipindeki alanlar için: önce kaç satır gireceğini sor, sonra her satırın sütunlarını sırayla topla. Değeri liste formatında ver: `[{{ "col_key1": "...", "col_key2": "..." }}, ...]`.
-4. PDF/Excel/Word yüklendiğinde içeriğinden değerleri çıkar.
-5. Her cevabından SONRA JSON blok döndür: en sonda `<!--UPDATE-->` etiketi ile birlikte:
+4. PDF/Excel/Word yüklendiğinde içeriğinden değerleri çıkar; sadece kısa alanları değil, uzun paragrafları da (davacı iddiaları, savunma, bilirkişi değerlendirmesi) analiz et ve tam metin üret.
+5. Uzun anlatı gerektiren alanlar için kaynak belgede yeterli bilgi yoksa, kullanıcıya hedefli SORULAR sor (ör: "Emsal seçim kriteriniz nedir?", "Değerleme metodu olarak hangisini tercih edersiniz?", "Konu taşınmazın avantaj/dezavantajları hakkında görüşünüz nedir?"). Boş bırakma.
+6. Cevaplarında **kalın**, *italik*, madde işaretli listeler ve başlıklar gibi Markdown formatını RAHATLIKLA kullan — kullanıcı arayüzü bunu render eder.
+7. Her cevabından SONRA JSON blok döndür: en sonda `<!--UPDATE-->` etiketi ile birlikte:
    `<!--UPDATE {{"fields": {{"kisi": "Ali", "emsaller": [{{"adres":"X","alan":100}}] }} }}-->`
-6. Tüm alanlar dolduğunda "Rapor tamamlandı" yaz ve `<!--UPDATE {{...status:'completed'}}-->` işaretle.
+8. Tüm alanlar dolduğunda "Rapor tamamlandı" yaz ve `<!--UPDATE {{...status:'completed'}}-->` işaretle.
 
 ## Toplanacak Alanlar (JSON şema)
 {fields_json}
 
 ## Şu ana kadar toplanan bilgiler
 {collected}
+{narrative_hint}
 
 ## Kurallar
-- Kısa, net ve profesyonel bir dille yaz.
+- Profesyonel, hukuki ve teknik doğrulukla yaz. Belirsiz kalma; belgede olmayan kritik bilgiyi kullanıcıya sor.
+- Anlatı alanları için asla tek cümlelik yüzeysel özet döndürme.
 - Her cevabın sonunda MUTLAKA `<!--UPDATE {{...}}-->` etiketi olsun.
 - Kullanıcı ilgisiz bir şey sorarsa nazikçe rapor akışına geri getir."""
+
 
     template = _template_by_id(chat.get("template_id", ""))
     if not template:
@@ -1106,46 +1134,104 @@ async def autofill_chat_from_attachments(
         _cleanup_tmp()
         raise HTTPException(status_code=400, detail="Analiz edilebilir görsel/PDF eki bulunamadı")
 
-    # Build field list from template
+    # Build field list from template (include full type info so AI knows narrative vs. short vs. image slots)
     tpl = _template_by_id(chat.get("template_id", "")) if chat.get("template_id") else None
     ut = await _get_user_template(chat["user_template_id"]) if chat.get("user_template_id") else None
     if tpl:
-        target_fields = [{"key": f["key"], "label": f["label"]} for f in tpl["fields"]]
+        target_fields = [{"key": f["key"], "label": f["label"], "type": "text"} for f in tpl["fields"]]
         template_name = tpl["name"]
+        all_template_fields = target_fields
     elif ut:
-        target_fields = [{"key": f["key"], "label": f.get("label", f["key"]), "type": f.get("type", "text")}
+        target_fields = [{"key": f["key"], "label": f.get("label", f["key"]),
+                          "type": f.get("type", "text"), "hint": f.get("hint", "")}
                          for f in ut.get("fields", [])]
         template_name = ut.get("name", "Özel Şablon")
+        all_template_fields = target_fields
     else:
         await db.users.update_one({"user_id": user.user_id}, {"$inc": {"wallet_balance": NOMINAL_HOLD}})
         _cleanup_tmp()
         raise HTTPException(status_code=400, detail="Bu sohbete bağlı şablon bulunamadı")
 
-    fields_json = json.dumps(target_fields, ensure_ascii=False)
+    # Detect narrative fields (long-form legal/valuation paragraphs)
+    narrative_keywords = ("iddia", "savunma", "gerekce", "gerekçe", "değerlendirme", "degerlendirme",
+                          "sonuc", "sonuç", "beyan", "talep", "aciklama", "açıklama", "karar",
+                          "tespit", "gozlem", "gözlem", "kiymet", "kıymet",
+                          "hukuki", "davaci", "davacı", "davali", "davalı", "bilirkişi", "bilirkisi",
+                          "yorum", "analiz", "özet", "ozet")
+    narrative_keys: List[str] = []
+    image_slot_keys: List[str] = []
+    for f in all_template_fields:
+        key_l = (f.get("key") or "").lower()
+        lbl_l = (f.get("label") or "").lower()
+        hint_l = (f.get("hint") or "").lower()
+        if f.get("type") == "image":
+            image_slot_keys.append(f.get("key"))
+            continue
+        if f.get("type") == "textarea" or any(kw in key_l or kw in lbl_l or kw in hint_l for kw in narrative_keywords):
+            narrative_keys.append(f.get("key"))
+
+    # Fields the AI should extract text values for (excludes image slots)
+    text_fields = [{k: v for k, v in f.items() if k != "hint"} for f in all_template_fields if f.get("type") != "image"]
+    fields_json = json.dumps(text_fields, ensure_ascii=False)
+
+    # Image slot info for the vision model (so it can map uploaded photos to slots)
+    image_slots_json = json.dumps(
+        [{"key": k, "label": next((f.get("label") for f in all_template_fields if f.get("key") == k), k),
+          "hint": next((f.get("hint") for f in all_template_fields if f.get("key") == k), "")}
+         for k in image_slot_keys],
+        ensure_ascii=False,
+    )
+    # Separate image attachments (we'll pass their filenames to AI so it can reference by name)
+    image_files = [f for f in files if (f.get("mime_type") or "").startswith("image/")]
+    image_file_manifest = json.dumps(
+        [{"filename": f["filename"], "upload_id": f["upload_id"]} for f in image_files],
+        ensure_ascii=False,
+    )
 
     system = (
-        "Sen KırCan Report AI'sın — Türk gayrimenkul değerleme uzmanı asistanı. "
-        "Yüklenen belgeleri (tapu, imar planı, yapı ruhsatı, yer görme, emsal listesi vb.) analiz edip "
-        "verilen şablon alanlarına uygun değerleri çıkaran deneyimli bir uzmansın.\n\n"
-        "KURALLAR:\n"
-        "1. Sadece belgelerde AÇIKÇA yazılı bilgilerden değer üret. Tahmin YAPMA.\n"
+        "Sen KırCan Report AI'sın — SPK lisanslı, deneyimli bir Türk gayrimenkul değerleme ve hukuki "
+        "bilirkişi uzmanısın. Yüklenen belgeleri (tapu, imar planı, yapı ruhsatı, dava dilekçesi, "
+        "savunma, emsal listesi, mahkeme kararı, yer görme tutanağı vb.) DERİNLEMESİNE analiz edip "
+        "verilen şablon alanlarına uygun değerleri çıkarırsın.\n\n"
+        "GENEL KURALLAR:\n"
+        "1. Belgelerde AÇIKÇA yazan bilgileri değer olarak üret. Uydurma bilgi verme.\n"
         "2. Aynı alan için farklı belgelerde farklı değer varsa 'duplicates' listesine ekle.\n"
-        "3. Belge KAPSAM DIŞI ise (tapu/imar/emsal/değerleme değilse) out_of_scope=true dön ve neden yaz.\n"
-        "4. Değeri bulamadığın alanları atla, boş string dönme.\n"
-        "5. Sadece geçerli JSON dön, açıklama YOK.\n\n"
+        "3. Belge KAPSAM DIŞI ise (gayrimenkul değerleme veya hukuki değerleme ile ilgili değilse) "
+        "out_of_scope listesine ekle.\n"
+        "4. Sadece geçerli JSON dön, başka açıklama YAZMA.\n\n"
+        "UZUN ANLATI ALANLARI (narrative_keys):\n"
+        f"Aşağıdaki alan anahtarları TAM PARAGRAF gerektirir: {narrative_keys}\n"
+        "Bu alanlar için:\n"
+        "- 1-2 cümlelik yüzeysel özet YETERSİZDİR. 3-8 cümlelik gerekçeli, hukuki/teknik dille yazılmış "
+        "profesyonel paragraf üret.\n"
+        "- Davacı iddialarını, davalı savunmalarını, mahkeme kararlarını, teknik tespitleri ve "
+        "değerlendirmeleri belgeden sentezle. Sadece kopyala-yapıştır YAPMA — anlamlı bir özet çıkar.\n"
+        "- Belgede eksik olan kritik bilgi varsa (ör: değerleme metodu tercihi, emsal seçim gerekçesi, "
+        "avantaj/dezavantaj yorumu) o alanı fields'a EKLEME; onun yerine 'missing_critical' listesine "
+        "{{'field': 'anahtar', 'question': 'Uzmana yöneltilecek soru'}} olarak ekle.\n\n"
+        "GÖRSEL ALAN EŞLEŞTİRMESİ (image_map):\n"
+        f"Şablonda şu görsel slotlar var: {image_slots_json}\n"
+        f"Yüklenen görsel dosyaları: {image_file_manifest}\n"
+        "Eğer görsel yüklendiyse VE şablonda görsel slot varsa, her görseli içeriğine göre en uygun "
+        "slota eşle (ör: bina cephesi fotoğrafı → 'cephe' slotu, tapu fotoğrafı → 'tapu_gorsel' slotu, "
+        "krokili görsel → 'kroki'). Emin değilsen boş bırak.\n"
         f"HEDEF ŞABLON: {template_name}\n"
-        f"HEDEF ALANLAR: {fields_json}\n\n"
+        f"HEDEF METİN ALANLARI: {fields_json}\n\n"
         "ÇIKTI FORMATI (SADECE JSON):\n"
         "{\n"
-        '  "fields": {"field_key": "değer", ...},\n'
+        '  "fields": {"field_key": "değer veya tam paragraf", ...},\n'
         '  "duplicates": [{"field": "key", "values": [{"source": "dosya adı", "value": "..."}, ...]}],\n'
         '  "out_of_scope": [{"filename": "...", "reason": "..."}],\n'
+        '  "missing_critical": [{"field": "key", "question": "Uzmana soru"}],\n'
+        '  "image_map": [{"upload_id": "img_...", "field_key": "slot_anahtari", "reason": "kısa neden"}],\n'
         '  "notes": "kısa açıklama"\n'
         "}"
     )
     user_text = (
-        f"Ekli {len(files)} dosyayı analiz et ve şablon alanlarını doldur. "
-        f"Belge adları: {', '.join(f['filename'] for f in files)}."
+        f"Ekli {len(files)} dosyayı DERİNLEMESİNE analiz et. "
+        f"Belge adları: {', '.join(f['filename'] for f in files)}. "
+        f"Uzun anlatı alanlarında tam paragraf üret, eksik kritik bilgileri 'missing_critical' listesine ekle, "
+        f"görselleri en uygun şablon slotuna eşle."
     )
 
     try:
@@ -1219,6 +1305,57 @@ async def autofill_chat_from_attachments(
     # Cleanup temp files + directory (uses shared helper to guarantee identical behavior on success/failure)
     _cleanup_tmp()
 
+    # ---- Process image_map: assign uploaded images to template image slots ----
+    image_assignments: List[Dict[str, Any]] = []
+    image_map = parsed.get("image_map") or []
+    # Track which image slots are already filled and which upload_ids have been assigned
+    current_fields = chat.get("fields") or {}
+    used_upload_ids: set = set()
+    used_slots: set = set()
+    valid_slot_keys = set(image_slot_keys)
+    upload_id_to_file = {f["upload_id"]: f for f in image_files}
+    for entry in image_map:
+        if not isinstance(entry, dict):
+            continue
+        uid = entry.get("upload_id")
+        fkey = entry.get("field_key")
+        if not uid or not fkey:
+            continue
+        if fkey not in valid_slot_keys or fkey in used_slots:
+            continue
+        if uid in used_upload_ids or uid not in upload_id_to_file:
+            continue
+        prev = current_fields.get(fkey)
+        # Skip if slot already has an image
+        if isinstance(prev, dict) and prev.get("__image__") and prev.get("upload_id"):
+            continue
+        finfo = upload_id_to_file[uid]
+        # The upload doc has storage_path already (image is already in Object Storage from /uploads)
+        upload_doc = await db.uploads.find_one({"upload_id": uid, "user_id": user.user_id}, {"_id": 0})
+        if not upload_doc or not upload_doc.get("storage_path"):
+            continue
+        width_mm = 80
+        if isinstance(prev, dict) and prev.get("width_mm"):
+            width_mm = prev.get("width_mm")
+        image_value = {
+            "__image__": True,
+            "storage_path": upload_doc["storage_path"],
+            "upload_id": uid,
+            "preview_url": f"/api/uploads/file/{uid}",
+            "filename": finfo["filename"],
+            "width_mm": width_mm,
+        }
+        image_assignments.append({
+            "field_key": fkey,
+            "upload_id": uid,
+            "filename": finfo["filename"],
+            "preview_url": image_value["preview_url"],
+            "reason": entry.get("reason", ""),
+            "value": image_value,
+        })
+        used_upload_ids.add(uid)
+        used_slots.add(fkey)
+
     # Read current wallet post-reconciliation (safer than computing from stale `reserved`)
     latest_user = await db.users.find_one({"user_id": user.user_id}, {"wallet_balance": 1, "_id": 0})
     new_balance = round(float((latest_user or {}).get("wallet_balance", 0)), 2)
@@ -1227,6 +1364,8 @@ async def autofill_chat_from_attachments(
         "fields": parsed.get("fields") or {},
         "duplicates": parsed.get("duplicates") or [],
         "out_of_scope": parsed.get("out_of_scope") or [],
+        "missing_critical": parsed.get("missing_critical") or [],
+        "image_assignments": image_assignments,
         "notes": parsed.get("notes") or "",
         "tokens": {"input": in_tok, "output": out_tok},
         "cost_try": charged_try,

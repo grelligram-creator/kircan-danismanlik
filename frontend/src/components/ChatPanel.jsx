@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Send, Paperclip, X, FileText, Loader2, Sparkles, AlertCircle, Check } from "lucide-react";
+import { Send, Paperclip, X, FileText, Loader2, Sparkles, AlertCircle, Check, ImageIcon } from "lucide-react";
 import { api, API } from "@/lib/api";
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 const fmtTRY = (n) => `₺${Number(n).toLocaleString("tr-TR", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 
@@ -44,7 +46,7 @@ export default function ChatPanel({ chat, messages, onStreamStart, onStreamDelta
       if ((data.out_of_scope || []).length > 0) {
         toast.warning(`${data.out_of_scope.length} belge kapsam dışı`, { description: data.out_of_scope[0]?.reason });
       }
-      if (Object.keys(data.fields || {}).length === 0 && (data.duplicates || []).length === 0) {
+      if (Object.keys(data.fields || {}).length === 0 && (data.duplicates || []).length === 0 && (data.image_assignments || []).length === 0 && (data.missing_critical || []).length === 0) {
         toast.info("Belgelerden alan çıkarılamadı");
       }
     } catch (e) {
@@ -66,9 +68,15 @@ export default function ChatPanel({ chat, messages, onStreamStart, onStreamDelta
     for (const [key, value] of Object.entries(resolvedDuplicates)) {
       merged[key] = value;
     }
+    // Include auto-assigned images (as image field values)
+    for (const a of (autofillResult.image_assignments || [])) {
+      merged[a.field_key] = a.value;
+    }
     try {
       await api.patch(`/chats/${chat.chat_id}/fields`, { fields: merged });
-      toast.success(`${Object.keys(merged).length} alan dolduruldu`, { description: `Ücret: ₺${autofillResult.cost_try}` });
+      const imgCount = (autofillResult.image_assignments || []).length;
+      const desc = `Ücret: ₺${autofillResult.cost_try}` + (imgCount ? ` · ${imgCount} görsel eşlendi` : "");
+      toast.success(`${Object.keys(merged).length} alan dolduruldu`, { description: desc });
       onFieldsUpdated?.();
       setAttachments([]);
       setAutofillResult(null);
@@ -245,7 +253,7 @@ export default function ChatPanel({ chat, messages, onStreamStart, onStreamDelta
                 ref={fileInputRef}
                 type="file"
                 multiple
-                accept=".pdf,.docx,.doc,.xlsx,.xls,.txt,.csv"
+                accept=".pdf,.docx,.doc,.xlsx,.xls,.txt,.csv,image/*"
                 className="hidden"
                 onChange={handleUpload}
                 data-testid="file-input"
@@ -304,6 +312,44 @@ export default function ChatPanel({ chat, messages, onStreamStart, onStreamDelta
                   ))}
                 </div>
               )}
+              {(autofillResult.image_assignments || []).length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-xs font-mono uppercase tracking-widest text-zinc-500 flex items-center gap-1.5">
+                    <ImageIcon className="w-3.5 h-3.5" />
+                    Otomatik Eşlenen Görseller
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {autofillResult.image_assignments.map((a, i) => (
+                      <div key={i} className="border border-zinc-200 rounded-md p-2 bg-zinc-50" data-testid={`img-assign-${a.field_key}`}>
+                        <div className="flex items-center gap-2 mb-1">
+                          <img src={`${API}${a.preview_url}`} alt={a.filename} className="w-14 h-14 object-cover rounded border border-zinc-300" />
+                          <div className="flex-1 min-w-0">
+                            <div className="text-xs font-mono text-[var(--brand-navy)] truncate">{a.field_key}</div>
+                            <div className="text-[10px] text-zinc-500 truncate">{a.filename}</div>
+                          </div>
+                        </div>
+                        {a.reason && <div className="text-[10px] text-zinc-600 italic truncate">{a.reason}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {(autofillResult.missing_critical || []).length > 0 && (
+                <div className="bg-blue-50 border border-blue-200 rounded-md p-3 space-y-2" data-testid="missing-critical-section">
+                  <div className="flex items-center gap-2 text-blue-900 font-medium text-sm">
+                    <AlertCircle className="w-4 h-4" />Uzmandan Bilgi Gerekli
+                  </div>
+                  <div className="text-xs text-blue-800 mb-1">Bu alanlar için değerleme uzmanının görüşüne ihtiyaç var. Sohbette AI size soracak:</div>
+                  <div className="space-y-1.5">
+                    {autofillResult.missing_critical.map((m, i) => (
+                      <div key={i} className="text-xs text-blue-900" data-testid={`missing-${m.field}`}>
+                        <span className="font-mono bg-blue-100 px-1.5 py-0.5 rounded">{m.field}</span>
+                        <span className="ml-2">— {m.question}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               {(autofillResult.duplicates || []).length > 0 && (
                 <div className="space-y-2">
                   <div className="text-xs font-mono uppercase tracking-widest text-zinc-500">Mükerrer Alanlar (birini seçin)</div>
@@ -356,7 +402,7 @@ export default function ChatPanel({ chat, messages, onStreamStart, onStreamDelta
               data-testid="autofill-accept-btn"
               onClick={acceptAutofill}
               className="bg-[var(--brand-navy)] text-white"
-              disabled={!autofillResult || Object.keys(autofillResult.fields || {}).length + Object.keys(resolvedDuplicates).length === 0}
+              disabled={!autofillResult || Object.keys(autofillResult.fields || {}).length + Object.keys(resolvedDuplicates).length + (autofillResult.image_assignments || []).length === 0}
             >
               <Check className="w-4 h-4 mr-1" />
               Onayla ve Doldur
@@ -370,6 +416,7 @@ export default function ChatPanel({ chat, messages, onStreamStart, onStreamDelta
 
 function MessageBubble({ message, streaming }) {
   const isUser = message.role === "user";
+  const cleanText = stripUpdateMarker(message.content);
   return (
     <div className={`flex gap-4 ${isUser ? "flex-row-reverse" : ""}`}>
       <div className={`w-8 h-8 rounded-md flex-shrink-0 flex items-center justify-center text-xs font-mono ${
@@ -383,10 +430,40 @@ function MessageBubble({ message, streaming }) {
             ? "bg-[var(--brand-navy)] text-white"
             : "bg-zinc-50 border border-zinc-200 text-zinc-900"
         }`}>
-          <div className="whitespace-pre-wrap text-sm leading-relaxed font-body">
-            {stripUpdateMarker(message.content)}
-            {streaming && <span className="inline-block w-1.5 h-4 ml-0.5 bg-zinc-400 align-middle animate-pulse" />}
-          </div>
+          {isUser ? (
+            <div className="whitespace-pre-wrap text-sm leading-relaxed font-body">
+              {cleanText}
+              {streaming && <span className="inline-block w-1.5 h-4 ml-0.5 bg-zinc-400 align-middle animate-pulse" />}
+            </div>
+          ) : (
+            <div className="text-sm leading-relaxed font-body markdown-body" data-testid="assistant-markdown">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  p: ({node, ...props}) => <p className="mb-2 last:mb-0 whitespace-pre-wrap" {...props} />,
+                  strong: ({node, ...props}) => <strong className="font-semibold text-zinc-950" {...props} />,
+                  em: ({node, ...props}) => <em className="italic" {...props} />,
+                  ul: ({node, ...props}) => <ul className="list-disc pl-5 my-2 space-y-1" {...props} />,
+                  ol: ({node, ...props}) => <ol className="list-decimal pl-5 my-2 space-y-1" {...props} />,
+                  li: ({node, ...props}) => <li className="text-sm" {...props} />,
+                  h1: ({node, ...props}) => <h1 className="text-base font-semibold mt-2 mb-1" {...props} />,
+                  h2: ({node, ...props}) => <h2 className="text-sm font-semibold mt-2 mb-1" {...props} />,
+                  h3: ({node, ...props}) => <h3 className="text-sm font-semibold mt-2 mb-1" {...props} />,
+                  code: ({node, inline, ...props}) => inline
+                    ? <code className="bg-zinc-100 text-zinc-800 px-1 py-0.5 rounded font-mono text-xs" {...props} />
+                    : <code className="block bg-zinc-100 text-zinc-800 p-2 rounded font-mono text-xs overflow-x-auto" {...props} />,
+                  blockquote: ({node, ...props}) => <blockquote className="border-l-2 border-zinc-300 pl-3 italic text-zinc-600 my-2" {...props} />,
+                  a: ({node, ...props}) => <a className="text-[var(--brand-navy)] underline" target="_blank" rel="noreferrer" {...props} />,
+                  table: ({node, ...props}) => <table className="w-full my-2 border-collapse text-xs" {...props} />,
+                  th: ({node, ...props}) => <th className="border border-zinc-300 px-2 py-1 bg-zinc-100 text-left" {...props} />,
+                  td: ({node, ...props}) => <td className="border border-zinc-300 px-2 py-1" {...props} />,
+                }}
+              >
+                {cleanText}
+              </ReactMarkdown>
+              {streaming && <span className="inline-block w-1.5 h-4 ml-0.5 bg-zinc-400 align-middle animate-pulse" />}
+            </div>
+          )}
           {message.attachments?.length > 0 && (
             <div className="mt-2 pt-2 border-t border-white/20 flex flex-wrap gap-1">
               {message.attachments.map((a) => (

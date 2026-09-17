@@ -158,7 +158,14 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - **87 tests pass**: 28 new Phase 2 (Vision multimodal, PDF text path, MAX_ATTACHMENTS, negative-balance guard, temp cleanup, 400-not-502, wallet reconciliation) + 45 RBAC + 14 invite baseurl.
 - Real Claude Vision calls verified: 8 konut fields extracted from synthetic tapu image and PDF.
 
-## Implemented (v7 — Feb 2026 · Phase 1a: Object Storage + Preview Speed)
+## Implemented (v8 — Feb 2026 · Narrative AI + Markdown Chat + Image Auto-Mapping)
+- **Markdown rendering in chat** — `ChatPanel.jsx` `MessageBubble` now renders assistant messages via `react-markdown` + `remark-gfm`. Supports `**bold**`, `*italic*`, headings, bulleted/numbered lists, blockquotes, code, and GFM tables. User bubbles remain plain-text (whitespace-pre-wrap).
+- **Narrative-aware AI extraction** — `_build_system_prompt` (user_template branch) now identifies "narrative" fields by type (`textarea`) or hint/label keywords (davacı iddiaları, savunma, bilirkişi değerlendirmesi, karar, tespit, kıymet takdiri, hukuki yorum, sonuç, beyan…) and instructs Claude to produce 3–8-sentence gerekçeli paragraphs instead of one-line summaries. AI is now explicitly told to use Markdown formatting.
+- **Missing-critical follow-ups** — `/api/chats/{id}/autofill` response contract adds `missing_critical: [{field, question}]`. When source docs don't have crucial evaluation input (metod tercihi, avantaj/dezavantaj analizi, emsal seçim gerekçesi), AI adds them here instead of leaving fields blank. Frontend dialog surfaces them as "Uzmandan Bilgi Gerekli" blue callout.
+- **Image auto-mapping** — Vision autofill now accepts image files, exposes template `image` slots to Claude via `image_slots_json` + `image_file_manifest`, and asks for an `image_map: [{upload_id, field_key, reason}]`. Backend post-processes into `image_assignments`; frontend previews thumbnails and merges into `chat.fields` on "Onayla ve Doldur". Filename→upload_id fallback and 1-slot-1-image auto-assign heuristic guarantee assignment even when Claude omits image_map.
+- **File input accept** — Chat file picker now accepts `image/*` (previously PDF/DOCX/XLSX/CSV/TXT only).
+
+
 - **Emergent Object Storage** — All uploads (`/api/uploads`, `/api/chats/{id}/image`, `/api/kb/upload`) now persist to Object Storage instead of pod-local disk. Legacy pod-local files still readable (graceful fallback). New helpers: `storage_utils.py`, `_resolve_image_paths`, `_ensure_local_template`. Startup event mints a shared `storage_key` once.
 - **Template preview cache** — `GET /user_templates/{tid}/preview` now caches rendered HTML by hash(template + values + images + tables). Bounded LRU (200 entries). Repeated same-fields fetches return instantly, no mammoth reparse.
 - **Preview reload polish** — Frontend debounces preview requests by 300ms and guards against stale race responses. "Şablon yükleniyor..." shows spinner + Turkish error message with a "Tekrar dene" button on failure.

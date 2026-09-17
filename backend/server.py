@@ -1314,23 +1314,34 @@ async def autofill_chat_from_attachments(
     used_slots: set = set()
     valid_slot_keys = set(image_slot_keys)
     upload_id_to_file = {f["upload_id"]: f for f in image_files}
+    filename_to_upload_id = {f["filename"]: f["upload_id"] for f in image_files}
+
+    def _resolve_upload_id(entry: Dict[str, Any]) -> Optional[str]:
+        uid = entry.get("upload_id")
+        if uid and uid in upload_id_to_file:
+            return uid
+        # Fallback: allow Claude to reference by filename
+        fn = entry.get("filename") or entry.get("file")
+        if fn and fn in filename_to_upload_id:
+            return filename_to_upload_id[fn]
+        return None
+
     for entry in image_map:
         if not isinstance(entry, dict):
             continue
-        uid = entry.get("upload_id")
-        fkey = entry.get("field_key")
+        uid = _resolve_upload_id(entry)
+        fkey = entry.get("field_key") or entry.get("field")
         if not uid or not fkey:
             continue
         if fkey not in valid_slot_keys or fkey in used_slots:
             continue
-        if uid in used_upload_ids or uid not in upload_id_to_file:
+        if uid in used_upload_ids:
             continue
         prev = current_fields.get(fkey)
         # Skip if slot already has an image
         if isinstance(prev, dict) and prev.get("__image__") and prev.get("upload_id"):
             continue
         finfo = upload_id_to_file[uid]
-        # The upload doc has storage_path already (image is already in Object Storage from /uploads)
         upload_doc = await db.uploads.find_one({"upload_id": uid, "user_id": user.user_id}, {"_id": 0})
         if not upload_doc or not upload_doc.get("storage_path"):
             continue
@@ -1355,6 +1366,39 @@ async def autofill_chat_from_attachments(
         })
         used_upload_ids.add(uid)
         used_slots.add(fkey)
+
+    # Heuristic fallback: if Claude omitted image_map but there are exactly N images and N unfilled
+    # slots (up to 1..1 or 1..few), assign each image to the first available slot so users
+    # aren't stuck manually re-uploading. Only triggers when nothing was assigned above.
+    if not image_assignments and image_files:
+        free_slots = [k for k in image_slot_keys
+                      if k not in used_slots and
+                      not (isinstance(current_fields.get(k), dict)
+                           and current_fields[k].get("__image__")
+                           and current_fields[k].get("upload_id"))]
+        unassigned = [f for f in image_files if f["upload_id"] not in used_upload_ids]
+        # Only auto-assign when the mapping is unambiguous (1 image, 1 slot) or 1 slot for many
+        if len(free_slots) == 1 and len(unassigned) == 1:
+            finfo = unassigned[0]
+            fkey = free_slots[0]
+            upload_doc = await db.uploads.find_one({"upload_id": finfo["upload_id"], "user_id": user.user_id}, {"_id": 0})
+            if upload_doc and upload_doc.get("storage_path"):
+                image_value = {
+                    "__image__": True,
+                    "storage_path": upload_doc["storage_path"],
+                    "upload_id": finfo["upload_id"],
+                    "preview_url": f"/api/uploads/file/{finfo['upload_id']}",
+                    "filename": finfo["filename"],
+                    "width_mm": 80,
+                }
+                image_assignments.append({
+                    "field_key": fkey,
+                    "upload_id": finfo["upload_id"],
+                    "filename": finfo["filename"],
+                    "preview_url": image_value["preview_url"],
+                    "reason": "Tek görsel → tek boş slot otomatik eşleme",
+                    "value": image_value,
+                })
 
     # Read current wallet post-reconciliation (safer than computing from stale `reserved`)
     latest_user = await db.users.find_one({"user_id": user.user_id}, {"wallet_balance": 1, "_id": 0})

@@ -1,0 +1,42 @@
+{
+  "summary": "P0 fixes for (1) Markdown rendering in AI chat, (2) narrative-aware autofill with missing_critical + image_assignments, and (3) PATCH /fields accepting image-dict values — all verified. Backend: new suite /app/backend/tests/test_p13_markdown_narrative.py (5 tests, 4 pass, 1 skipped as documented). Frontend: FAQ chat's greeting containing '**KırCan Danışmanlık**' renders as <strong> with data-testid='assistant-markdown' present and no literal ** in output; user bubbles remain plain-text (whitespace-pre-wrap, no markdown parsing). One real Claude Vision call executed for autofill and one real Claude SSE call for the user_template narrative chat.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/chats/{id}/autofill", "issue": "For a single tapu-like PNG with no clearly identifiable 'cephe' photo, Claude did not populate image_map; image_assignments came back as []. This is expected LLM behaviour, but consider adding a soft heuristic (e.g. if exactly 1 image_slot + exactly 1 image upload, auto-assign) so the feature is discoverable during demos. Response contract remains correct — arrays exist even when empty."},
+      {"endpoint": "POST /api/chats/{id}/autofill (system prompt)", "issue": "System prompt tells Claude to return image_map entries keyed by 'upload_id', but the image_file_manifest already exposes upload_ids. Sometimes Claude returns the filename instead of upload_id — recommend also accepting {filename: 'x.png', field_key: 'slot'} entries in the image_map post-processor (resolve filename→upload_id) for better recall."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_p13_markdown_narrative.py",
+    "/app/test_reports/pytest/p13_markdown.xml"
+  ],
+  "action_items": [
+    "Optional: fallback image_map matching (filename or single-slot single-image auto-assign) to improve UX when Claude omits image_map.",
+    "Optional: accept image_map entries by filename in autofill_chat_from_attachments (currently only upload_id)."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 2644 lines; the newly added narrative + image_map logic further inflates autofill_chat_from_attachments (330+ lines). Consider extracting `_build_autofill_prompt`, `_reconcile_autofill_wallet` and `_apply_image_map` helpers to keep the endpoint readable.",
+    "Markdown rendering: ChatPanel MessageBubble properly restricts ReactMarkdown to assistant bubbles; user bubbles still use whitespace-pre-wrap. Consider adding rehype-sanitize (react-markdown does not sanitize by default) to defend against ']]>'-style injection or embedded HTML if Claude ever streams raw HTML.",
+    "_build_system_prompt narrative_hint is only appended when narrative_fields is non-empty — good. However, the ternary `f\"...{narrative_fields}\" if narrative_fields else \"\"` sits inside an f-string block that is not surrounded by parentheses, so any future addition to that block risks accidentally always evaluating the truthy branch. Suggest hoisting narrative_hint to its own variable before the return.",
+    "autofill_chat_from_attachments: image_assignments are computed but never written back to db — relying entirely on frontend to PATCH them. Consider adding a `dry_run` flag / auto-apply option, or at least logging when the frontend does NOT confirm within N minutes so we can surface orphaned suggestions in analytics."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_p13_markdown_narrative.py (new)"
+  ],
+  "success_rate": {
+    "backend": "4/5 pass (80%); 1 skip is a documented LLM-behavior skip, not a failure",
+    "frontend": "markdown rendering verified visually + programmatically (has_strong=True, raw_bold_asterisks_in_text=False)"
+  },
+  "test_credentials": "Used /app/memory/test_credentials.md as-is: session_token=test_super_admin_token (super admin), user_id=user_grelligram_seed.",
+  "seed_data_creation": "Created TEST_P13 user_template docs (TEST_p13_ut_*) with narrative textarea + image slot; TEST_p13_tapu.png upload; ~4 test chats. All cleaned up via module-scoped autouse fixture.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend suite lives at /app/backend/tests/test_p13_markdown_narrative.py — module-scoped fixtures with autouse cleanup; contains exactly 2 real Claude calls (1 Vision autofill + 1 SSE). To verify markdown rendering in FAQ chat: log in with cookie session_token=test_super_admin_token, open the FAQ chat, assert `.locator('[data-testid=\"assistant-markdown\"]').first` contains <strong> and no literal '**'. The greeting itself contains '**KırCan Danışmanlık**' so this can be verified without sending a new (paid) message.",
+  "rca_of_the_issue": "(1) Raw ** asterisks: MessageBubble previously rendered assistant text with whitespace-pre-wrap plain text. Fix uses ReactMarkdown+remark-gfm only for assistant bubbles (user bubbles kept as plain text). Verified: `<strong>KırCan Danışmanlık</strong>` in DOM, no literal '**'. (2) Short-only autofill: _build_system_prompt (user_tpl) + autofill's system prompt now enumerate narrative_keys and explicitly demand 3–8-sentence paragraphs plus a missing_critical array for gaps; response contract adds image_assignments+missing_critical always-arrays. (3) PATCH /fields with image dict: patch_chat_fields uses `if v in (None, ''): pop` — a dict v is never equal to None/'', so it correctly falls through to `new_fields[k] = v`. Verified by round-trip create→PATCH→GET on both konut chat and cleared via `clear[]`. (4) SSE regression: user_template chat with narrative fields streams cleanly (delta+done events, non-empty output); the `narrative_hint if narrative_fields else ''` conditional does not raise."
+}

@@ -144,13 +144,19 @@ def expert_block() -> str:
     """Return the full expert knowledge block to inject into system prompts.
 
     Keep this concatenated into a SINGLE string so Claude's prompt caching can
-    reuse the exact bytes across every chat.
+    reuse the exact bytes across every chat. Result is memoized so repeated
+    autofill/SSE calls don't re-join exemplars on every request.
     """
+    cached = getattr(expert_block, "_cached", None)
+    if cached is not None:
+        return cached
     exemplars = "\n\n".join(f"### {k}\n{v}" for k, v in NARRATIVE_EXEMPLARS.items())
-    return (
+    block = (
         "# UZMAN KİMLİĞİ\n" + EXPERT_PERSONA.strip() + "\n\n"
         "# RAPOR AKIŞ KILAVUZU\n" + REPORT_FLOW_PRIMER.strip() + "\n\n"
         "# PARAGRAF STİLİ ÖRNEKLERİ (Üretim kalıbı — asla kopyalamayacaksın, "
         "yalnızca dil ve derinlik tonunu yakalayacaksın)\n" + exemplars + "\n\n"
         "# TUTARLILIK KURALLARI\n" + CONSISTENCY_RULES.strip()
     )
+    expert_block._cached = block  # type: ignore[attr-defined]
+    return block

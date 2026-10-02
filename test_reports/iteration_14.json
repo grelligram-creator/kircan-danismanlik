@@ -1,0 +1,43 @@
+{
+  "summary": "Iteration 14: validated the KırCan expert knowledge injection + narrative_drafts + consistency_warnings contract. Added /app/backend/tests/test_p14_narrative_consistency.py (4 tests, all passing serially): (1) expert_block() import/content invariants (6598 chars, 3 required sections), (2) real Claude Vision autofill on a Turkish legal narrative PNG — response contract complete with all 12 required keys; narrative_drafts contained 3 substantive paragraphs (7-12 sentences, 867-1283 chars each) merged into `fields`; consistency_warnings correctly flagged the deliberately injected 'Davacı adı yazımı' + 'cephe 25,30 vs 26,00 m' conflicts; missing_critical returned 6 expert-level follow-up questions; cost_try ≈ 4 TL, (3) insufficient balance → HTTP 402 with nominal hold refunded (wallet stayed ~0.01 TL), (4) SSE on mixed narrative + short-field user_template chat emitted delta + done events, ~380-970 chars of expert Turkish text, zero errors. Frontend: FAQ greeting's **KırCan Danışmanlık** renders as <strong> with data-testid='assistant-markdown' (no regression from P13). Static audit confirms data-testid='narrative-drafts-section', 'consistency-section', per-draft 'narrative-{field}', and 'Onayla ve Doldur' enable-logic (fields OR duplicates OR image_assignments non-empty) are correctly wired in ChatPanel.jsx.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/chats/{id}/autofill", "issue": "Preview-env ingress (Cloudflare) returns 502 at ~75-80s while Claude Vision is still generating. On a single page PNG with 3 narrative fields the real end-to-end latency is 60-120s; isolated runs succeed, back-to-back runs sometimes 502 at the ingress edge even though backend eventually completes. Mitigated in the test with a 2-retry loop; product-side consider streaming the autofill output or lifting the ingress timeout."},
+      {"endpoint": "POST /api/chats/{id}/autofill (prompt caching)", "issue": "The 6.6 KB kircan_knowledge.expert_block() is prepended as a plain string in the system prompt, not as a cache_control-tagged block. Claude SDK/LiteLLM supports marking the long static part as cached — would cut ~5-6s off every autofill. Nice-to-have."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_p14_narrative_consistency.py",
+    "/app/test_reports/pytest/p14.xml"
+  ],
+  "action_items": [
+    "Consider adding 'prompt caching' / anthropic-beta cache_control to the expert_block section of the autofill + user_template SSE system prompts — would reduce latency ~5-10% on every call and dodge the 75s ingress edge.",
+    "Optional: switch autofill response to a chunked/streaming endpoint so partial narrative_drafts are deliverable before the ingress ~75s cutoff."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 2745 lines (grew ~100 lines for narrative_drafts + consistency_warnings merge + image_map). The autofill_chat_from_attachments handler alone owns ~380 lines (prompts + parsing + wallet reconcile + image_map + merge). Extract helpers: `_build_autofill_system(template, narrative_keys, image_slots, files)`, `_parse_autofill_json(text)`, `_merge_drafts_into_fields(parsed)`, `_reconcile_autofill_wallet(user, charged, hold)` — this would also make the retry/caching work in the action items trivial.",
+    "kircan_knowledge.expert_block() concatenates fresh strings on every call (NARRATIVE_EXEMPLARS join + f-string headers). For a function that's called on every autofill + every SSE message, this is wasted work — memoize with functools.lru_cache(maxsize=1) or compute at module import.",
+    "Autofill response includes `success: true` as a boolean but the frontend never checks it; either remove it or make the frontend respect it (e.g. show a toast if success=false).",
+    "The merge of narrative_drafts into `fields` (server.py:1452-1459) silently overwrites a short-field value if Claude puts the same key in both `fields` and `narrative_drafts`. Comment acknowledges this (`prefer the narrative draft`) — fine, but add a soft warning in `notes` when a collision happens so the UI can indicate 'we replaced your short value with the paragraph draft'.",
+    "Frontend ChatPanel.jsx uses `nd.field` as React key AND as part of a data-testid (`narrative-${nd.field}`). If Claude returns duplicate narrative_drafts entries for the same field (edge case), React will throw a key collision — defensively use `${i}-${nd.field}`."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_p14_narrative_consistency.py (new)"
+  ],
+  "success_rate": {
+    "backend": "4/4 pass (100%) — serial run; parallel-worker run flakes on the autofill test due to Claude concurrency vs ingress timeout, documented as infra not product",
+    "frontend": "FAQ markdown rendering verified live (<strong> present, no literal ** in rendered text); narrative/consistency UI verified by static code audit (testids wired, enable-logic correct)"
+  },
+  "test_credentials": "Used /app/memory/test_credentials.md as-is: session_token=test_super_admin_token (user_grelligram_seed, super_admin). Wallet reset to 500 TL by fixture before module and after cleanup.",
+  "seed_data_creation": "Module-scoped autouse cleanup fixture creates/deletes: 2-3 TEST_p14_ut_* user_templates (3 short + 3 narrative textarea fields), 1 TEST_p14_dava.png upload (Turkish legal narrative rendered on PNG with intentional davacı adı + cephe-genişliği inconsistency), 3 user_template chats. All removed on module teardown.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend tests live at /app/backend/tests/test_p14_narrative_consistency.py. MUST be run with `-n 0` (serial) via `pytest -n 0 tests/test_p14_narrative_consistency.py` because the Claude Vision autofill call takes 60-120s and the preview ingress has a ~75s edge timeout — concurrent xdist workers trigger reproducible 502s. The autofill test contains a 3-retry loop to handle sporadic 502s but still assumes serial execution for the LLM-heavy test. If an earlier xdist run leaves wallet drained, the module-level fixture auto-resets wallet_balance to 500.0 for user_grelligram_seed. Frontend narrative-drafts-section + consistency-section are rendered conditionally inside the autofill dialog — to exercise end-to-end UI, trigger a real autofill from the ChatPanel on a user_template chat with narrative textarea fields. P13 markdown-render regression is preserved (verified via live DOM check — `<strong class=\"font-semibold\">KırCan Danışmanlık</strong>` present under data-testid=\"assistant-markdown\").",
+  "rca_of_the_issue": "No product bug surfaced this iteration. (1) expert_block injection validated end-to-end: on a Turkish legal PNG, Claude produced 3 paragraph drafts (7-12 sentences each in bilirkişi diction), 2 real consistency warnings matching the planted inconsistencies, and 6 missing_critical follow-up questions — this proves _build_system_prompt (user_tpl branch) + autofill system prompt + response-merge logic all work. (2) Autofill 402 refund still correct: wallet drained to 0.01 TL → 402 Payment Required → wallet remained 0.01 (hold refunded). (3) SSE unchanged: data: {\"type\":\"delta\",...}\\n\\n frames interleaved with final data: {\"type\":\"done\",\"assistant_message\":...} frame, non-empty assistant content, no error events, expert tone + follow-up questions as spec'd. (4) Observed 75s 502s are preview-env Cloudflare ingress timeouts, not application bugs — the backend LLM call eventually completes (verified in isolated 60s run). Testing agent added retry loop + action-item to add prompt-caching to shrink that latency."
+}

@@ -158,7 +158,15 @@ Turkish real estate valuation AI chat: users choose report templates, AI collect
 - **87 tests pass**: 28 new Phase 2 (Vision multimodal, PDF text path, MAX_ATTACHMENTS, negative-balance guard, temp cleanup, 400-not-502, wallet reconciliation) + 45 RBAC + 14 invite baseurl.
 - Real Claude Vision calls verified: 8 konut fields extracted from synthetic tapu image and PDF.
 
-## Implemented (v8 — Feb 2026 · Narrative AI + Markdown Chat + Image Auto-Mapping)
+## Implemented (v11 — Feb 2026 · Expert-Level AI Behavior Overhaul)
+- **Gömülü uzman bilgi tabanı** (`/app/backend/kircan_knowledge.py`): 6.6KB uzman kimliği, SPK II-14.1/14.2 standartları, HMK bilirkişi rapor akışı (10 standart bölüm), 5 yüksek kaliteli örnek paragraf (davacı iddiaları, savunma, inceleme tespitleri, kıymet takdiri, sonuç ve kanaat), tutarlılık kuralları. `expert_block()` memoized.
+- **İki fazlı autofill akışı**: `/api/chats/{id}/autofill` yanıtı artık `fields` (kısa alanlar) + `narrative_drafts` (her biri `{field, draft, sources, followup_questions}`) + `consistency_warnings` (NEW — belgeler arası çelişkiler) + `missing_critical` + `image_assignments` döndürüyor. Backend narrative_drafts'ı otomatik olarak `fields`'a birleştiriyor; frontend tek PATCH ile hepsini kaydediyor.
+- **Autofill prompt**: Expert block + 7-madde çıktı mantığı (kısa alanlar / paragraf taslakları / tutarlılık / eksik kritik / görsel eşleme / mükerrer / kapsam dışı). `max_tokens=8192` (önceden 4096). Claude artık 4-10 cümlelik gerekçeli paragraflar üretiyor (test: 867-1283 karakter arası, 7-12 cümle).
+- **Chat SSE sistem prompt'u** (user_template): Expert block + "Kısa alanlar tek tek ONAYLATARAK, paragraf alanları TASLAK sunarak" davranışı + tutarlılık kontrolü uyarıları. AI artık proaktif meslektaş gibi davranıyor.
+- **Frontend** (`ChatPanel.jsx`): Autofill dialog'una 2 yeni bölüm — "Tutarsızlık Uyarıları" (amber) ve "Paragraf Taslakları" (navy, kaynak atıfları + AI'nin soracağı sorular ile). Uzun alan değerleri truncate yerine whitespace-pre-wrap olarak gösteriliyor.
+- **Test**: `/app/backend/tests/test_p14_narrative_consistency.py` — 4/4 pass. Claude Vision deneysel PDF/PNG'den 3 paragraf taslağı, 2 bilinçli tutarsızlık uyarısı ve 6 uzman seviyesi follow-up sorusu üretti (iteration_14).
+
+
 - **Markdown rendering in chat** — `ChatPanel.jsx` `MessageBubble` now renders assistant messages via `react-markdown` + `remark-gfm`. Supports `**bold**`, `*italic*`, headings, bulleted/numbered lists, blockquotes, code, and GFM tables. User bubbles remain plain-text (whitespace-pre-wrap).
 - **Narrative-aware AI extraction** — `_build_system_prompt` (user_template branch) now identifies "narrative" fields by type (`textarea`) or hint/label keywords (davacı iddiaları, savunma, bilirkişi değerlendirmesi, karar, tespit, kıymet takdiri, hukuki yorum, sonuç, beyan…) and instructs Claude to produce 3–8-sentence gerekçeli paragraphs instead of one-line summaries. AI is now explicitly told to use Markdown formatting.
 - **Missing-critical follow-ups** — `/api/chats/{id}/autofill` response contract adds `missing_critical: [{field, question}]`. When source docs don't have crucial evaluation input (metod tercihi, avantaj/dezavantaj analizi, emsal seçim gerekçesi), AI adds them here instead of leaving fields blank. Frontend dialog surfaces them as "Uzmandan Bilgi Gerekli" blue callout.

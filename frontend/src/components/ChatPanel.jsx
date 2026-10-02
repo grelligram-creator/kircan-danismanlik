@@ -400,7 +400,7 @@ export default function ChatPanel({ chat, messages, onStreamStart, onStreamDelta
                   </div>
                   <div className="space-y-2">
                     {autofillResult.narrative_drafts.map((nd, i) => (
-                      <div key={i} className="border border-[var(--brand-navy)]/30 rounded-md bg-[var(--brand-navy)]/5 p-3 space-y-2" data-testid={`narrative-${nd.field}`}>
+                      <div key={`${i}-${nd.field}`} className="border border-[var(--brand-navy)]/30 rounded-md bg-[var(--brand-navy)]/5 p-3 space-y-2" data-testid={`narrative-${nd.field}`}>
                         <div className="flex items-center justify-between">
                           <span className="font-mono text-xs text-[var(--brand-navy)]">{nd.field}</span>
                           {Array.isArray(nd.sources) && nd.sources.length > 0 && (

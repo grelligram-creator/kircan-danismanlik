@@ -378,16 +378,67 @@ export default function ChatPanel({ chat, messages, onStreamStart, onStreamDelta
                   ))}
                 </div>
               )}
+              {(autofillResult.consistency_warnings || []).length > 0 && (
+                <div className="bg-amber-50 border border-amber-300 rounded-md p-3 space-y-2" data-testid="consistency-section">
+                  <div className="flex items-center gap-2 text-amber-900 font-medium text-sm">
+                    <AlertCircle className="w-4 h-4" />Tutarsızlık Uyarıları
+                  </div>
+                  <div className="text-xs text-amber-800 mb-1">Belgeler arasında şu çelişkiler tespit edildi — sohbette AI size danışacak:</div>
+                  <div className="space-y-1.5">
+                    {autofillResult.consistency_warnings.map((w, i) => (
+                      <div key={i} className="text-xs text-amber-900" data-testid={`consistency-${i}`}>
+                        <span className="font-semibold">{w.topic}:</span> <span>{w.detail}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {(autofillResult.narrative_drafts || []).length > 0 && (
+                <div className="space-y-2" data-testid="narrative-drafts-section">
+                  <div className="text-xs font-mono uppercase tracking-widest text-zinc-500">
+                    Paragraf Taslakları ({autofillResult.narrative_drafts.length})
+                  </div>
+                  <div className="space-y-2">
+                    {autofillResult.narrative_drafts.map((nd, i) => (
+                      <div key={i} className="border border-[var(--brand-navy)]/30 rounded-md bg-[var(--brand-navy)]/5 p-3 space-y-2" data-testid={`narrative-${nd.field}`}>
+                        <div className="flex items-center justify-between">
+                          <span className="font-mono text-xs text-[var(--brand-navy)]">{nd.field}</span>
+                          {Array.isArray(nd.sources) && nd.sources.length > 0 && (
+                            <span className="text-[10px] text-zinc-500">Kaynak: {nd.sources.join(" · ")}</span>
+                          )}
+                        </div>
+                        <div className="text-xs text-zinc-800 whitespace-pre-wrap leading-relaxed border-l-2 border-[var(--brand-gold)] pl-2">
+                          {nd.draft}
+                        </div>
+                        {Array.isArray(nd.followup_questions) && nd.followup_questions.length > 0 && (
+                          <div className="pt-1 border-t border-zinc-200 space-y-0.5">
+                            <div className="text-[10px] font-mono uppercase text-zinc-500">AI'nin size soracakları:</div>
+                            {nd.followup_questions.map((q, j) => (
+                              <div key={j} className="text-[11px] text-zinc-700">• {q}</div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               {Object.keys(autofillResult.fields || {}).length > 0 && (
                 <div className="space-y-1">
                   <div className="text-xs font-mono uppercase tracking-widest text-zinc-500">Çıkarılan Alanlar</div>
                   <div className="border border-zinc-200 rounded-md divide-y divide-zinc-100">
-                    {Object.entries(autofillResult.fields).map(([k, v]) => (
-                      <div key={k} className="flex justify-between px-3 py-2 text-sm" data-testid={`field-${k}`}>
-                        <span className="font-mono text-xs text-zinc-500">{k}</span>
-                        <span className="text-zinc-900 max-w-[60%] text-right">{String(v)}</span>
-                      </div>
-                    ))}
+                    {Object.entries(autofillResult.fields).map(([k, v]) => {
+                      const sv = typeof v === "string" ? v : JSON.stringify(v);
+                      const isLong = sv.length > 120;
+                      return (
+                        <div key={k} className={`px-3 py-2 text-sm ${isLong ? "flex flex-col gap-1" : "flex justify-between"}`} data-testid={`field-${k}`}>
+                          <span className="font-mono text-xs text-zinc-500">{k}</span>
+                          <span className={`text-zinc-900 ${isLong ? "whitespace-pre-wrap text-xs leading-relaxed" : "max-w-[60%] text-right truncate"}`}>
+                            {isLong ? sv : String(v)}
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}

@@ -27,6 +27,7 @@ from document_utils import parse_uploaded_file, generate_pdf, generate_docx, gen
 from wallet_packages import WALLET_PACKAGES, get_package
 from auth_deps import SUPER_ADMIN_EMAILS, is_super_admin, is_admin_or_super
 from knowledge_base import get_kb_context
+from kircan_knowledge import expert_block as _kircan_expert_block
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -450,7 +451,7 @@ async def _claude_vision_extract(
             system_message=system,
         )
         .with_model("anthropic", "claude-sonnet-5")
-        .with_params(max_tokens=4096)
+        .with_params(max_tokens=8192)
     )
     msg = UserMessage(text="\n".join(text_blocks), file_contents=image_contents or None)
 
@@ -938,52 +939,72 @@ def _build_system_prompt(chat: Dict[str, Any], user_tpl: Optional[Dict[str, Any]
         narrative_keywords = ("iddia", "savunma", "gerekce", "gerekçe", "değerlendirme", "degerlendirme",
                               "sonuc", "sonuç", "beyan", "talep", "aciklama", "açıklama", "karar",
                               "tespit", "gözlem", "gozlem", "kıymet takdiri", "kiymet takdiri",
-                              "hukuki", "davaci", "davacı", "davali", "davalı", "bilirkişi", "bilirkisi")
+                              "hukuki", "davaci", "davacı", "davali", "davalı", "bilirkişi", "bilirkisi",
+                              "inceleme", "yorum", "analiz", "ozet", "özet", "kanaat")
         narrative_fields = []
+        short_fields = []
         for f in user_tpl["fields"]:
             key_l = (f.get("key") or "").lower()
             lbl_l = (f.get("label") or "").lower()
             hint_l = (f.get("hint") or "").lower()
             ftype = f.get("type")
+            if ftype in ("image", "table"):
+                continue
             if ftype == "textarea" or any(kw in key_l or kw in lbl_l or kw in hint_l for kw in narrative_keywords):
                 narrative_fields.append(f.get("key"))
-        narrative_hint = (
-            f"\n\n## Anlatı (uzun paragraf) alanları\n"
-            f"Bu alanlar için 1-2 cümlelik cevap YETERSİZDİR. Her biri için gayrimenkul değerleme uzmanı "
-            f"gibi 3-8 cümlelik, gerekçeli, hukuki dille yazılmış TAM PARAGRAF üret. Ekli belgelerden "
-            f"davacı iddialarını, savunmaları, mahkeme kararlarını, teknik tespitleri ve bilirkişi "
-            f"değerlendirmelerini sentezleyerek özetle. Kaynak belgede eksik olan kritik unsurları "
-            f"kullanıcıya açıkça sor.\n"
-            f"Narratif alan anahtarları: {narrative_fields}"
-            if narrative_fields else ""
-        )
-        return f"""{brand_intro}
+            else:
+                short_fields.append(f.get("key"))
+        narrative_hint = ""
+        if narrative_fields or short_fields:
+            narrative_hint = (
+                "\n\n## Alan Tiplerine Göre Davranış\n"
+                f"**Kısa alanlar** (mahkeme adı, dava no, tarih, taraf isimleri, parsel vb.): {short_fields}\n"
+                f"→ Belgelerden çıkar; her birini kullanıcıya TEK TEK ONAYLATARAK ilerle. "
+                f"Örnek: '**Mahkeme adı**: Ankara 5. Asliye Hukuk Mahkemesi — Bu doğru mu, "
+                f"ya da düzeltmek ister misiniz?'\n\n"
+                f"**Paragraf alanları** (davacı iddiaları, savunma, inceleme tespitleri, kıymet "
+                f"takdiri, sonuç ve kanaat vb.): {narrative_fields}\n"
+                "→ Her biri için SPK/HMK uyumlu, 4-10 cümlelik, gerekçeli TAM PARAGRAF üret. "
+                "Belgelerdeki olguları sentezle, resmi bilirkişi raporu diline çevir. "
+                "Taslağı önce sun ('TASLAK' başlığı ile), kullanıcıya 'Bu şekilde onaylıyor "
+                "musunuz, eklemek/çıkarmak istediğiniz bir husus var mı?' diye sor. "
+                "Belgelerde eksik olan kritik unsurları (örn. emsal gerekçesi, metod tercihi, "
+                "yıkım yükümlülüğü değerlendirmesi) kullanıcıya mutlaka SOR; boş bırakma.\n\n"
+                "## Tutarlılık Kontrolü\n"
+                "Belgeler arası çelişki (farklı yazılmış davacı adı, tutarsız yüzölçümü, çelişkili "
+                "tarihler) tespit edersen kullanıcıyı uyar: 'Belgelerde X iki farklı değerle "
+                "geçiyor: … / … — Hangisini kullanalım?'"
+            )
+        return f"""{_kircan_expert_block()}
 
-Kullanıcının **{user_tpl['name']}** şablonunu doldurmasına yardım ediyorsun.
+{brand_intro}
+
+Kullanıcı **{user_tpl['name']}** şablonunu dolduruyor. Sen onun yanında çalışan,
+raporu birlikte yazdığı kıdemli uzman meslektaşsın. Proaktif ol, soru sor,
+taslak sun, tutarlılık kontrol et.
 
 ## Görevin
-1. Aşağıdaki alanları SIRAYLA, tek tek kullanıcıya sor ve topla.
-2. `image` tipindeki alanlar için kullanıcıdan üstteki "Görsel Slotları" barından fotoğraf yüklemesini iste (değer olarak "__pending__" kaydet).
-3. `table` tipindeki alanlar için: önce kaç satır gireceğini sor, sonra her satırın sütunlarını sırayla topla. Değeri liste formatında ver: `[{{ "col_key1": "...", "col_key2": "..." }}, ...]`.
-4. PDF/Excel/Word yüklendiğinde içeriğinden değerleri çıkar; sadece kısa alanları değil, uzun paragrafları da (davacı iddiaları, savunma, bilirkişi değerlendirmesi) analiz et ve tam metin üret.
-5. Uzun anlatı gerektiren alanlar için kaynak belgede yeterli bilgi yoksa, kullanıcıya hedefli SORULAR sor (ör: "Emsal seçim kriteriniz nedir?", "Değerleme metodu olarak hangisini tercih edersiniz?", "Konu taşınmazın avantaj/dezavantajları hakkında görüşünüz nedir?"). Boş bırakma.
-6. Cevaplarında **kalın**, *italik*, madde işaretli listeler ve başlıklar gibi Markdown formatını RAHATLIKLA kullan — kullanıcı arayüzü bunu render eder.
-7. Her cevabından SONRA JSON blok döndür: en sonda `<!--UPDATE-->` etiketi ile birlikte:
-   `<!--UPDATE {{"fields": {{"kisi": "Ali", "emsaller": [{{"adres":"X","alan":100}}] }} }}-->`
-8. Tüm alanlar dolduğunda "Rapor tamamlandı" yaz ve `<!--UPDATE {{...status:'completed'}}-->` işaretle.
+1. Alanları yukarıdaki "Alan Tiplerine Göre Davranış" kılavuzuna göre topla.
+2. `image` alanları için üstteki Görsel Slotları barından yüklenmesini iste (değer "__pending__").
+3. `table` alanları için önce satır sayısı, sonra her satırın sütunlarını topla; değer: `[{{"col_key":"..."}}]`.
+4. Yüklenen PDF/DOCX/XLSX/görselleri analiz et; kısa alanları çıkar, paragraf alanlarını TASLAK olarak üret.
+5. Her mesajında Markdown kullan: **kalın**, *italik*, madde listeleri, başlıklar — kullanıcı arayüzü render ediyor.
+6. Her yanıtından SONRA JSON blok dön: `<!--UPDATE {{"fields": {{...}} }}-->`
+7. Tüm alanlar onaylandığında "Rapor tamamlandı" yaz ve `<!--UPDATE {{...status:'completed'}}-->` işaretle.
 
-## Toplanacak Alanlar (JSON şema)
+## Şablon Alanları (JSON şema)
 {fields_json}
 
 ## Şu ana kadar toplanan bilgiler
 {collected}
 {narrative_hint}
 
-## Kurallar
-- Profesyonel, hukuki ve teknik doğrulukla yaz. Belirsiz kalma; belgede olmayan kritik bilgiyi kullanıcıya sor.
-- Anlatı alanları için asla tek cümlelik yüzeysel özet döndürme.
-- Her cevabın sonunda MUTLAKA `<!--UPDATE {{...}}-->` etiketi olsun.
-- Kullanıcı ilgisiz bir şey sorarsa nazikçe rapor akışına geri getir."""
+## Mutlak Kurallar
+- Hiçbir alanda uydurma yapma. Belgede yoksa kullanıcıya SOR.
+- Paragraf alanlarında asla 1 cümlelik yüzeysel özet dönme — ÖRNEK PARAGRAF STİLLERİ seviyesinde yaz.
+- Her yanıtta `<!--UPDATE {{...}}-->` etiketi olsun (kullanıcıya görünmez).
+- Kullanıcı konu dışına çıkarsa nazikçe rapor akışına döndür."""
+
 
 
     template = _template_by_id(chat.get("template_id", ""))
@@ -1189,49 +1210,69 @@ async def autofill_chat_from_attachments(
     )
 
     system = (
-        "Sen KırCan Report AI'sın — SPK lisanslı, deneyimli bir Türk gayrimenkul değerleme ve hukuki "
-        "bilirkişi uzmanısın. Yüklenen belgeleri (tapu, imar planı, yapı ruhsatı, dava dilekçesi, "
-        "savunma, emsal listesi, mahkeme kararı, yer görme tutanağı vb.) DERİNLEMESİNE analiz edip "
-        "verilen şablon alanlarına uygun değerleri çıkarırsın.\n\n"
-        "GENEL KURALLAR:\n"
-        "1. Belgelerde AÇIKÇA yazan bilgileri değer olarak üret. Uydurma bilgi verme.\n"
-        "2. Aynı alan için farklı belgelerde farklı değer varsa 'duplicates' listesine ekle.\n"
-        "3. Belge KAPSAM DIŞI ise (gayrimenkul değerleme veya hukuki değerleme ile ilgili değilse) "
-        "out_of_scope listesine ekle.\n"
-        "4. Sadece geçerli JSON dön, başka açıklama YAZMA.\n\n"
-        "UZUN ANLATI ALANLARI (narrative_keys):\n"
-        f"Aşağıdaki alan anahtarları TAM PARAGRAF gerektirir: {narrative_keys}\n"
-        "Bu alanlar için:\n"
-        "- 1-2 cümlelik yüzeysel özet YETERSİZDİR. 3-8 cümlelik gerekçeli, hukuki/teknik dille yazılmış "
-        "profesyonel paragraf üret.\n"
-        "- Davacı iddialarını, davalı savunmalarını, mahkeme kararlarını, teknik tespitleri ve "
-        "değerlendirmeleri belgeden sentezle. Sadece kopyala-yapıştır YAPMA — anlamlı bir özet çıkar.\n"
-        "- Belgede eksik olan kritik bilgi varsa (ör: değerleme metodu tercihi, emsal seçim gerekçesi, "
-        "avantaj/dezavantaj yorumu) o alanı fields'a EKLEME; onun yerine 'missing_critical' listesine "
-        "{{'field': 'anahtar', 'question': 'Uzmana yöneltilecek soru'}} olarak ekle.\n\n"
-        "GÖRSEL ALAN EŞLEŞTİRMESİ (image_map):\n"
-        f"Şablonda şu görsel slotlar var: {image_slots_json}\n"
-        f"Yüklenen görsel dosyaları: {image_file_manifest}\n"
-        "Eğer görsel yüklendiyse VE şablonda görsel slot varsa, her görseli içeriğine göre en uygun "
-        "slota eşle (ör: bina cephesi fotoğrafı → 'cephe' slotu, tapu fotoğrafı → 'tapu_gorsel' slotu, "
-        "krokili görsel → 'kroki'). Emin değilsen boş bırak.\n"
-        f"HEDEF ŞABLON: {template_name}\n"
-        f"HEDEF METİN ALANLARI: {fields_json}\n\n"
-        "ÇIKTI FORMATI (SADECE JSON):\n"
+        _kircan_expert_block() + "\n\n"
+        "# GÖREV: DERİN BELGE ANALİZİ VE OTOMATİK DOLDURMA\n"
+        "Sen KırCan Report AI — SPK lisanslı, bilirkişi deneyimli, uzman gayrimenkul "
+        "değerleme asistanısın. Yüklenen belgeleri (dava dilekçesi, cevap dilekçesi, "
+        "mahkeme kararı, tapu kayıtları, imar durum belgeleri, keşif tutanakları, "
+        "kıymet takdir komisyonu raporları, emsal listeleri, fotoğraflar, görsel ekler) "
+        "KAPSAMLI biçimde oku, akışı anla, her alanı doğru tipte doldur.\n\n"
+        "## Çıktı Mantığı\n"
+        "1. **Kısa alanlar** (tarih, isim, numara, parsel, bedel vs.): Belgeden "
+        "AÇIKÇA çıkar, 'fields' sözlüğüne ekle. Belgede yoksa EKLEME.\n"
+        "2. **Paragraf alanları** (narrative_keys): HER BİRİ için ayrı 'narrative_drafts' "
+        "girişi oluştur. Her taslak:\n"
+        "   - 4-10 cümlelik, SPK/HMK bilirkişi raporu diliyle,\n"
+        "   - Yukarıdaki ÖRNEK PARAGRAF STİLLERİ seviyesinde (ama asla kopyalama; "
+        "     kullanıcının kendi dosyasından sentezle),\n"
+        "   - Kaynak atıflarıyla (hangi dosyadan geldiğini kısaca belirt),\n"
+        "   - Belgede eksik olan kritik unsurlar için 'followup_questions' listesi.\n"
+        "3. **Tutarlılık** (consistency_warnings): Farklı yazılmış taraf adı, çelişkili "
+        "yüzölçümü/bedel/tarih, uyumsuz parsel bilgisi → her birini listeye yaz.\n"
+        "4. **Eksik kritik** (missing_critical): Hiçbir belgede olmayan ama rapor için "
+        "ŞART olan unsurlar (örn. emsal seçim gerekçesi, metod tercihi).\n"
+        "5. **Görsel eşleme** (image_map): Yüklenen fotoğrafları şablon görsel slotlarına "
+        "içeriğine göre eşle (cephe fotosu → 'cephe' slotu, tapu belgesi fotosu → "
+        "'tapu_gorsel' slotu, kroki → 'kroki').\n"
+        "6. **Mükerrer değerler** (duplicates): Aynı alan için farklı belgelerde farklı "
+        "değer varsa.\n"
+        "7. **Kapsam dışı** (out_of_scope): Değerleme/hukuki değerleme konusu olmayan "
+        "belgeler.\n\n"
+        f"## Narratif Alan Anahtarları (ÖNEMLİ)\n{narrative_keys}\n\n"
+        f"## Hedef Şablon: {template_name}\n"
+        f"## Hedef Kısa Alanlar (JSON): {fields_json}\n"
+        f"## Şablon Görsel Slotları: {image_slots_json}\n"
+        f"## Yüklenen Görsel Manifestosu: {image_file_manifest}\n\n"
+        "## ÇIKTI FORMATI (SADECE GEÇERLI JSON — başka açıklama yazma):\n"
+        "```json\n"
         "{\n"
-        '  "fields": {"field_key": "değer veya tam paragraf", ...},\n'
-        '  "duplicates": [{"field": "key", "values": [{"source": "dosya adı", "value": "..."}, ...]}],\n'
-        '  "out_of_scope": [{"filename": "...", "reason": "..."}],\n'
+        '  "fields": {"<kisa_alan_key>": "deger"},\n'
+        '  "narrative_drafts": [\n'
+        '    {\n'
+        '      "field": "davaci_iddialar",\n'
+        '      "draft": "Davacı taraf, dava dilekçesinde özetle; ... (4-10 cümle paragraf)",\n'
+        '      "sources": ["dava_dilekcesi.pdf s.1-2", "ek-2_emsal.pdf"],\n'
+        '      "followup_questions": ["Davacının mesnet gösterdiği emsalleri doğrular mısınız?"]\n'
+        '    }\n'
+        '  ],\n'
+        '  "duplicates": [{"field": "key", "values": [{"source": "dosya", "value": "..."}]}],\n'
+        '  "consistency_warnings": [\n'
+        '    {"topic": "Davacı adı", "detail": "Dilekçede \'Ali Veli\', keşif tutanağında \'Ali V. Yılmaz\'"}\n'
+        '  ],\n'
         '  "missing_critical": [{"field": "key", "question": "Uzmana soru"}],\n'
-        '  "image_map": [{"upload_id": "img_...", "field_key": "slot_anahtari", "reason": "kısa neden"}],\n'
-        '  "notes": "kısa açıklama"\n'
-        "}"
+        '  "image_map": [{"upload_id": "img_...", "field_key": "slot_anahtari", "reason": "..."}],\n'
+        '  "out_of_scope": [{"filename": "...", "reason": "..."}],\n'
+        '  "notes": "kısa genel not"\n'
+        "}\n"
+        "```"
     )
     user_text = (
-        f"Ekli {len(files)} dosyayı DERİNLEMESİNE analiz et. "
-        f"Belge adları: {', '.join(f['filename'] for f in files)}. "
-        f"Uzun anlatı alanlarında tam paragraf üret, eksik kritik bilgileri 'missing_critical' listesine ekle, "
-        f"görselleri en uygun şablon slotuna eşle."
+        f"Ekli {len(files)} dosyayı KAPSAMLI analiz et. Belge adları: "
+        f"{', '.join(f['filename'] for f in files)}. Kısa alanları 'fields'a; davacı iddiaları, "
+        f"savunma, inceleme tespitleri, kıymet takdiri, sonuç gibi paragraf alanlarını "
+        f"'narrative_drafts'a profesyonel bilirkişi diliyle TAM PARAGRAF olarak yaz. "
+        f"Tutarsızlıkları ve eksik kritik unsurları ayrı listelerde raporla. Görselleri "
+        f"en uygun şablon slotuna eşle."
     )
 
     try:
@@ -1403,12 +1444,28 @@ async def autofill_chat_from_attachments(
     # Read current wallet post-reconciliation (safer than computing from stale `reserved`)
     latest_user = await db.users.find_one({"user_id": user.user_id}, {"wallet_balance": 1, "_id": 0})
     new_balance = round(float((latest_user or {}).get("wallet_balance", 0)), 2)
+
+    # Merge narrative_drafts into `fields` so the accept-flow writes them in one PATCH.
+    # Also keep them separately so the UI can show source citations + followup questions.
+    narrative_drafts = parsed.get("narrative_drafts") or []
+    merged_fields: Dict[str, Any] = dict(parsed.get("fields") or {})
+    for nd in narrative_drafts:
+        if not isinstance(nd, dict):
+            continue
+        fkey = nd.get("field")
+        draft = nd.get("draft")
+        if fkey and isinstance(draft, str) and draft.strip():
+            # If both short fields and narrative drafts return the same key, prefer the narrative draft.
+            merged_fields[fkey] = draft.strip()
+
     return {
         "success": True,
-        "fields": parsed.get("fields") or {},
+        "fields": merged_fields,
+        "narrative_drafts": narrative_drafts,
         "duplicates": parsed.get("duplicates") or [],
         "out_of_scope": parsed.get("out_of_scope") or [],
         "missing_critical": parsed.get("missing_critical") or [],
+        "consistency_warnings": parsed.get("consistency_warnings") or [],
         "image_assignments": image_assignments,
         "notes": parsed.get("notes") or "",
         "tokens": {"input": in_tok, "output": out_tok},

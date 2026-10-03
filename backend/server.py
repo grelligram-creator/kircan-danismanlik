@@ -382,6 +382,10 @@ from template_utils import (
     extract_document_map, detect_placeholders_via_llm,
     apply_placeholders, render_docx, docx_to_html, preview_html,
 )
+from template_storage import (
+    write_template_to_storage, ensure_prepared_local, ensure_original_local,
+    ensure_both_local, migrate_legacy_templates,
+)
 
 TEMPLATES_DIR = ROOT_DIR / "user_templates"
 TEMPLATES_DIR.mkdir(exist_ok=True)
@@ -502,6 +506,17 @@ async def upload_user_template(
     # 3. inject Jinja tokens into a prepared copy
     summary = apply_placeholders(str(original_path), str(prepared_path), fields)
 
+    # 4. Upload both to Object Storage — pod disk is ephemeral.
+    original_storage_path = ""
+    prepared_storage_path = ""
+    try:
+        original_storage_path = await write_template_to_storage(tid, user.user_id, "original", content)
+        prepared_bytes = prepared_path.read_bytes()
+        prepared_storage_path = await write_template_to_storage(tid, user.user_id, "prepared", prepared_bytes)
+    except Exception as e:
+        logger.exception(f"Template Object Storage upload failed for {tid}: {e}")
+        # continue — legacy local paths still work until pod restart
+
     doc_record = {
         "template_id": tid,
         "user_id": user.user_id,
@@ -510,6 +525,8 @@ async def upload_user_template(
         "filename": file.filename,
         "original_docx_path": str(original_path),
         "prepared_docx_path": str(prepared_path),
+        "original_storage_path": original_storage_path,
+        "prepared_storage_path": prepared_storage_path,
         "fields": fields,
         "detection_summary": summary,
         "kind": "user",
@@ -520,7 +537,7 @@ async def upload_user_template(
     doc_record.pop("_id", None)
     return {
         "template": {
-            **{k: v for k, v in doc_record.items() if k not in ("original_docx_path", "prepared_docx_path")},
+            **{k: v for k, v in doc_record.items() if k not in ("original_docx_path", "prepared_docx_path", "original_storage_path", "prepared_storage_path")},
         },
     }
 
@@ -528,7 +545,7 @@ async def upload_user_template(
 @api.get("/user_templates")
 async def list_user_templates(user: User = Depends(get_current_user)):
     q = {"$or": [{"user_id": user.user_id}, {"shared_with": {"$in": [user.email, user.email.lower()]}}]}
-    cursor = db.user_templates.find(q, {"_id": 0, "original_docx_path": 0, "prepared_docx_path": 0}).sort("created_at", -1)
+    cursor = db.user_templates.find(q, {"_id": 0, "original_docx_path": 0, "prepared_docx_path": 0, "original_storage_path": 0, "prepared_storage_path": 0}).sort("created_at", -1)
     items = await cursor.to_list(500)
     for c in items:
         c["is_shared_with_me"] = c.get("user_id") != user.user_id
@@ -542,6 +559,8 @@ async def get_user_template(tid: str, user: User = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Template not found")
     t.pop("original_docx_path", None)
     t.pop("prepared_docx_path", None)
+    t.pop("original_storage_path", None)
+    t.pop("prepared_storage_path", None)
     t["is_shared_with_me"] = t.get("user_id") != user.user_id
     return t
 
@@ -596,19 +615,27 @@ async def restore_template_version(tid: str, vid: str, user: User = Depends(get_
         "note": f"Auto-snapshot before restoring {vid}",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    src_prep = Path(t["prepared_docx_path"])
-    if src_prep.exists():
-        snap = src_prep.parent / f"prepared_{current_ver['version_id']}.docx"
-        try:
-            shutil.copy2(str(src_prep), str(snap))
-            current_ver["prepared_snapshot_path"] = str(snap)
-        except Exception:
-            pass
+    try:
+        prep_local = await ensure_prepared_local(t, TEMPLATES_DIR)
+        snap_bytes = Path(prep_local).read_bytes()
+        snap_sp = await write_template_to_storage(tid, user.user_id, f"snapshot_{current_ver['version_id']}", snap_bytes)
+        current_ver["prepared_snapshot_storage_path"] = snap_sp
+    except Exception:
+        pass
     await db.template_versions.insert_one(current_ver)
 
     # Restore fields + rebuild prepared.docx from original + those fields
     fields = v.get("fields", [])
-    summary = apply_placeholders(t["original_docx_path"], t["prepared_docx_path"], fields)
+    try:
+        orig_local, prep_local = await ensure_both_local(t, TEMPLATES_DIR)
+    except FileNotFoundError:
+        raise HTTPException(status_code=410, detail="Şablon dosyası bulunamadı — şablonu yeniden yükleyin")
+    summary = apply_placeholders(orig_local, prep_local, fields)
+    # Push rebuilt prepared.docx back to Object Storage
+    try:
+        new_sp = await write_template_to_storage(tid, user.user_id, "prepared", Path(prep_local).read_bytes())
+    except Exception:
+        new_sp = t.get("prepared_storage_path", "")
     await db.user_templates.update_one(
         {"template_id": tid},
         {"$set": {
@@ -616,11 +643,15 @@ async def restore_template_version(tid: str, vid: str, user: User = Depends(get_
             "description": v.get("description") or t.get("description", ""),
             "fields": fields,
             "detection_summary": summary,
+            "prepared_storage_path": new_sp,
         }},
     )
+    _invalidate_preview_cache_for(tid)
     updated = await _get_user_template(tid)
     updated.pop("original_docx_path", None)
     updated.pop("prepared_docx_path", None)
+    updated.pop("original_storage_path", None)
+    updated.pop("prepared_storage_path", None)
     return updated
 
 
@@ -643,15 +674,13 @@ async def update_user_template(tid: str, payload: Dict[str, Any], user: User = D
         "detection_summary": t.get("detection_summary"),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    # Save prepared.docx snapshot next to it
-    src_prep = Path(t["prepared_docx_path"])
-    if src_prep.exists():
-        snap_path = src_prep.parent / f"prepared_{version['version_id']}.docx"
-        try:
-            shutil.copy2(str(src_prep), str(snap_path))
-            version["prepared_snapshot_path"] = str(snap_path)
-        except Exception:
-            pass
+    # Save prepared.docx snapshot to Object Storage
+    try:
+        prep_local = await ensure_prepared_local(t, TEMPLATES_DIR)
+        snap_sp = await write_template_to_storage(tid, user.user_id, f"snapshot_{version['version_id']}", Path(prep_local).read_bytes())
+        version["prepared_snapshot_storage_path"] = snap_sp
+    except Exception:
+        pass
     await db.template_versions.insert_one(version)
     updates: Dict[str, Any] = {}
     if "name" in payload:
@@ -694,13 +723,26 @@ async def update_user_template(tid: str, payload: Dict[str, Any], user: User = D
             clean_fields.append(entry)
         updates["fields"] = clean_fields
         # Re-apply placeholders on the original to rebuild prepared.docx
-        summary = apply_placeholders(t["original_docx_path"], t["prepared_docx_path"], clean_fields)
+        try:
+            orig_local, prep_local = await ensure_both_local(t, TEMPLATES_DIR)
+        except FileNotFoundError:
+            raise HTTPException(status_code=410, detail="Şablon dosyası bulunamadı — şablonu yeniden yükleyin")
+        summary = apply_placeholders(orig_local, prep_local, clean_fields)
+        # Push rebuilt prepared.docx back to Object Storage so other pods see the update
+        try:
+            new_sp = await write_template_to_storage(tid, user.user_id, "prepared", Path(prep_local).read_bytes())
+            updates["prepared_storage_path"] = new_sp
+        except Exception:
+            pass
         updates["detection_summary"] = summary
     if updates:
         await db.user_templates.update_one({"template_id": tid}, {"$set": updates})
+        _invalidate_preview_cache_for(tid)
     updated = await _get_user_template(tid)
     updated.pop("original_docx_path", None)
     updated.pop("prepared_docx_path", None)
+    updated.pop("original_storage_path", None)
+    updated.pop("prepared_storage_path", None)
     return updated
 
 
@@ -735,6 +777,18 @@ from collections import OrderedDict
 import hashlib as _hashlib
 _PREVIEW_CACHE: "OrderedDict[str, str]" = OrderedDict()
 _PREVIEW_CACHE_MAX = 200
+
+
+def _invalidate_preview_cache_for(tid: str) -> None:
+    """Drop all cached previews for a given template id."""
+    for k in list(_PREVIEW_CACHE.keys()):
+        try:
+            if tid in k or f'"tid": "{tid}"' in k:
+                _PREVIEW_CACHE.pop(k, None)
+        except Exception:
+            continue
+    # Simpler: just clear everything on template mutation. Preview is cheap to rebuild.
+    _PREVIEW_CACHE.clear()
 
 
 def _preview_cache_key(tid: str, tpl_path: str, values: dict, image_urls: dict, table_data: dict) -> str:
@@ -773,14 +827,20 @@ async def user_template_preview(tid: str, chat_id: Optional[str] = None, user: U
                     table_data[k] = v
                     values.pop(k, None)
 
+    # Resolve prepared docx from Object Storage (new) or legacy local path.
+    try:
+        prepared_local = await ensure_prepared_local(t, TEMPLATES_DIR)
+    except FileNotFoundError:
+        raise HTTPException(status_code=410, detail="Şablon dosyası bulunamadı — şablonu yeniden yükleyin")
+
     # Fast path: cached HTML for identical inputs (avoids mammoth re-parsing per keystroke)
-    ckey = _preview_cache_key(tid, t["prepared_docx_path"], values, image_urls, table_data)
+    ckey = _preview_cache_key(tid, prepared_local, values, image_urls, table_data)
     cached = _PREVIEW_CACHE.get(ckey)
     if cached is not None:
         _PREVIEW_CACHE.move_to_end(ckey)
         return {"html": cached, "fields": t.get("fields", []), "cached": True}
 
-    html = preview_html(t["prepared_docx_path"], values, image_urls, table_data)
+    html = preview_html(prepared_local, values, image_urls, table_data)
     _PREVIEW_CACHE[ckey] = html
     if len(_PREVIEW_CACHE) > _PREVIEW_CACHE_MAX:
         _PREVIEW_CACHE.popitem(last=False)
